@@ -27,16 +27,18 @@ fi
 APP_HOST="${APP_HOST:-127.0.0.1}"
 APP_PORT="${APP_PORT:-8199}"
 BROWSER_PORT="${BROWSER_PORT:-9222}"
+HEADLESS="${HEADLESS:-true}"
 PROXY_ENABLED="${PROXY_ENABLED:-false}"
 PROXY_ADDRESS="${PROXY_ADDRESS:-}"
 PROXY_BYPASS="${PROXY_BYPASS:-localhost,127.0.0.1}"
-PROXY_ENABLED_LOWER="$(printf '%s' "${PROXY_ENABLED}" | tr '[:upper:]' '[:lower:]')"
+HEADLESS_LOWER="$(printf '%s' "${HEADLESS}" | tr '[:upper:]' '[:lower:]')"
 
 echo
 echo "  当前配置:"
 echo "    APP_HOST     : ${APP_HOST}"
 echo "    APP_PORT     : ${APP_PORT}"
 echo "    BROWSER_PORT : ${BROWSER_PORT}"
+echo "    HEADLESS     : ${HEADLESS}"
 if [[ "${PROXY_ENABLED_LOWER}" == "true" ]]; then
   echo "    PROXY        : ${PROXY_ADDRESS}"
 else
@@ -230,6 +232,14 @@ if [[ "$(check_debug_port)" == "0" ]]; then
     "--disable-background-timer-throttling"
     "--disable-renderer-backgrounding"
   )
+
+  if [[ "${HEADLESS_LOWER}" == "true" ]]; then
+    BROWSER_ARGS+=(
+      "--headless=new"
+      "--no-sandbox"
+      "--disable-gpu"
+    )
+  fi
 
   if [[ "${PROXY_ENABLED_LOWER}" == "true" && -n "${PROXY_ADDRESS}" ]]; then
     BROWSER_ARGS+=("--proxy-server=${PROXY_ADDRESS}")
