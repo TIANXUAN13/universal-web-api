@@ -239,6 +239,8 @@ if [[ "$(check_debug_port)" == "0" ]]; then
       "--headless=new"
       "--no-sandbox"
       "--disable-gpu"
+      "--disable-dev-shm-usage"
+      "--disable-software-rasterizer"
     )
   fi
 
@@ -251,7 +253,7 @@ if [[ "$(check_debug_port)" == "0" ]]; then
 
   echo "[INFO] 启动浏览器: ${BROWSER_EXE}"
   "${BROWSER_EXE}" "${BROWSER_ARGS[@]}" about:blank >/dev/null 2>&1 &
-  sleep 2
+  sleep 4
 fi
 
 echo
