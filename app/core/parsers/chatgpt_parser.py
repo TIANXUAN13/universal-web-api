@@ -115,7 +115,7 @@ class ChatGPTParser(ResponseParser):
                     # 递归提取每个子操作
                     sub_path = op.get("p", "")
                     sub_op = op.get("o", "")
-                    sub_v = op.get("v", "")
+                    sub_v = op.get("v") or ""
                     if "/message/content/parts" in sub_path and sub_op == "append":
                         if isinstance(sub_v, str):
                             content += sub_v
@@ -127,7 +127,7 @@ class ChatGPTParser(ResponseParser):
         # 2. 明确的 append 操作：开启追加模式
         if "/message/content/parts" in path and op == "append":
             self._is_appending_text = True
-            v = data.get("v", "")
+            v = data.get("v") or ""
             if isinstance(v, str):
                 return v
             return ""

@@ -111,8 +111,8 @@ class AIStudioParser(ResponseParser):
                 if is_thinking:
                     continue
                 
-                if text:
-                    accumulated += text
+                if text:  # text 可能是 "" 或 None
+                    accumulated += (text or "")
                 
                 if block_done:
                     is_done = True

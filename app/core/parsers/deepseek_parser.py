@@ -146,7 +146,7 @@ class DeepSeekParser(ResponseParser):
             response = data["v"].get("response", {})
             fragments = response.get("fragments", [])
             for frag in fragments:
-                if isinstance(frag, dict) and "content" in frag:
+                if isinstance(frag, dict) and "content" in frag and frag["content"]:
                     content += frag["content"]
             return content
         
@@ -162,7 +162,7 @@ class DeepSeekParser(ResponseParser):
         if path == "fragments" and operation == "APPEND" and isinstance(value, list):
             content = ""
             for frag in value:
-                if isinstance(frag, dict) and "content" in frag:
+                if isinstance(frag, dict) and "content" in frag and frag["content"]:
                     content += frag["content"]
             return content
         

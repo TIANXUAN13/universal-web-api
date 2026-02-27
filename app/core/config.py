@@ -20,6 +20,7 @@ import logging
 import sys
 import threading
 import uuid
+import re
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 from functools import lru_cache
@@ -499,6 +500,12 @@ class SSEFormatter:
     def pack_chunk(cls, content: str, model: str = "web-browser", 
                    completion_id: str = None) -> str:
         """打包流式 chunk"""
+        # 清理引用标记如 [citation:1][citation:2]
+        content = re.sub(r'\[citation:\d+\]', '', content)
+        # 清理特殊标记
+        content = content.replace("FINISHEDSEARCH", "").replace("FINISHED", "")
+        content = content.strip()
+        
         chunk_id = completion_id or cls._generate_id()
         data = {
             "id": chunk_id,

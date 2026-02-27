@@ -33,6 +33,8 @@ logger = get_logger("MAIN")
 
 # ================= Lifespan =================
 
+import asyncio
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """应用生命周期管理"""
@@ -49,51 +51,47 @@ async def lifespan(app: FastAPI):
     logger.info(f"浏览器端口: {AppConfig.get_browser_port()}")
     logger.info("=" * 60)
 
-    # main.py 中 lifespan 函数的浏览器检查部分
-
-    try:
+    # 后台异步检查浏览器
+    async def check_browser_background():
+        await asyncio.sleep(0.5)  # 延迟检查，让服务先启动
+        try:
+            browser = get_browser(auto_connect=False)
+            health = browser.health_check()
         
-        browser = get_browser(auto_connect=False)
-        health = browser.health_check()
-    
-        if health["connected"]:
-            # 检查是否需要打开教程页（仅当浏览器刚启动、没有实际内容时）
-            should_open_tutorial = False
-            
-            try:
-                tab_ids = browser.page.get_tabs()
+            if health["connected"]:
+                should_open_tutorial = False
                 
-                if len(tab_ids) == 0:
-                    # 没有任何标签页
-                    should_open_tutorial = True
-                elif len(tab_ids) == 1:
-                    # 只有一个标签页，检查是否是空白页
-                    url = browser.page.url or ""
-                    blank_patterns = ("about:blank", "chrome://newtab/", "chrome://new-tab-page/", "")
-                    if url in blank_patterns:
-                        should_open_tutorial = True
-                # 多个标签页 = 用户已在使用，不打开教程
-                
-            except Exception as e:
-                logger.debug(f"检查标签页状态失败: {e}")
-            
-            if should_open_tutorial:
                 try:
-                    tutorial_url = f"http://{AppConfig.get_host()}:{AppConfig.get_port()}/static/tutorial.html"
-                    logger.info(f"📚 首次启动，打开教程页: {tutorial_url}")
-                    browser.page.get(tutorial_url, retry=0, show_errmsg=False)
+                    tab_ids = browser.page.get_tabs()
+                    
+                    if len(tab_ids) == 0:
+                        should_open_tutorial = True
+                    elif len(tab_ids) == 1:
+                        url = browser.page.url or ""
+                        blank_patterns = ("about:blank", "chrome://newtab/", "chrome://new-tab-page/", "")
+                        if url in blank_patterns:
+                            should_open_tutorial = True
+                    
                 except Exception as e:
-                    logger.warning(f"⚠️ 无法打开教程页: {e}")
+                    logger.debug(f"检查标签页状态失败: {e}")
+                
+                if should_open_tutorial:
+                    try:
+                        tutorial_url = f"http://{AppConfig.get_host()}:{AppConfig.get_port()}/static/tutorial.html"
+                        logger.info(f"📚 首次启动，打开教程页: {tutorial_url}")
+                        browser.page.get(tutorial_url, retry=0, show_errmsg=False)
+                    except Exception as e:
+                        logger.warning(f"⚠️ 无法打开教程页: {e}")
+                else:
+                    logger.info(f"✅ 浏览器已连接")
             else:
-                # 显示已连接状态
-                pool_info = health.get("tab_pool", {})
-                tab_count = pool_info.get('total', 0) if pool_info else 0
-                logger.info(f"✅ 浏览器已连接 (检测到 {len(tab_ids) if 'tab_ids' in dir() else '?'} 个现有页面，跳过教程)")
-        else:
-            logger.warning(f"⚠️ 浏览器未连接: {health.get('error', '未知')}")
-        
-    except Exception as e:
-        logger.warning(f"⚠️ 浏览器检查跳过: {e}")
+                logger.warning(f"⚠️ 浏览器未连接: {health.get('error', '未知')}")
+            
+        except Exception as e:
+            logger.warning(f"⚠️ 浏览器检查跳过: {e}")
+
+    # 启动后台检查
+    asyncio.create_task(check_browser_background())
 
     logger.info("")
     logger.info("🚀 服务已就绪！")
@@ -203,6 +201,8 @@ async def internal_error_handler(request, exc):
 
 if __name__ == "__main__":
     import uvicorn
+    import signal
+    import threading
 
     print("\n" + "=" * 60)
     print("环境变量配置（可选）:")
@@ -212,10 +212,19 @@ if __name__ == "__main__":
     print("  BROWSER_PORT=9222         # 浏览器端口")
     print("=" * 60 + "\n")
 
-    uvicorn.run(
-        app,
-        host=AppConfig.get_host(),
-        port=AppConfig.get_port(),
-        log_level="warning",  # 隐藏 uvicorn 的 INFO 日志
-        access_log=False
-    )
+    def run_server():
+        uvicorn.run(
+            app,
+            host=AppConfig.get_host(),
+            port=AppConfig.get_port(),
+            log_level="warning",
+            access_log=False
+        )
+
+    server_thread = threading.Thread(target=run_server, daemon=True)
+    server_thread.start()
+    
+    try:
+        server_thread.join()
+    except KeyboardInterrupt:
+        print("\n👋 服务已关闭")

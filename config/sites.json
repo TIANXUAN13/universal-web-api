@@ -28,13 +28,13 @@
       {
         "key": "message_wrapper",
         "description": "消息完整容器（包裹单条消息的外层元素，用于多节点拼接）",
-        "enabled": false,
+        "enabled": true,
         "required": false
       },
       {
         "key": "generating_indicator",
         "description": "生成中指示器（如停止按钮、加载动画，用于检测是否还在输出）",
-        "enabled": false,
+        "enabled": true,
         "required": false
       }
     ]
@@ -121,9 +121,9 @@
         ],
         "stealth": false,
         "image_extraction": {
-          "enabled": false,
+          "enabled": true,
           "selector": "img",
-          "container_selector": null,
+          "container_selector": ".chat-turn-container.model ms-cmark-node",
           "debounce_seconds": 2,
           "wait_for_load": true,
           "load_timeout_seconds": 5,
@@ -534,7 +534,7 @@
           {
             "action": "FILL_INPUT",
             "target": "input_box",
-            "optional": false,
+            "optional": true,
             "value": null
           },
           {
@@ -552,9 +552,9 @@
         ],
         "stealth": false,
         "image_extraction": {
-          "enabled": false,
+          "enabled": true,
           "selector": "img",
-          "container_selector": null,
+          "container_selector": "div.ds-markdown",
           "debounce_seconds": 2,
           "wait_for_load": true,
           "load_timeout_seconds": 5,
