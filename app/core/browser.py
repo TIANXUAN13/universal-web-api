@@ -233,17 +233,24 @@ class BrowserCore:
 
     def _build_prompt_from_messages(self, messages: List[Dict]) -> str:
         """从消息列表构建发送给网页的文本"""
-        prompt_parts = []
-        
+        parsed_messages = []
+
         for m in messages:
             role = m.get('role', 'user')
             content = m.get('content', '')
             text = self._extract_text_from_content(content)
-            
+
             if text:
-                prompt_parts.append(f"{role}: {text}")
-        
-        return "\n\n".join(prompt_parts)
+                parsed_messages.append((role, text))
+
+        if not parsed_messages:
+            return ""
+
+        # 单轮纯用户提问时，直接发送原文，避免网页侧显示 "user: xxx" 造成观感不一致
+        if len(parsed_messages) == 1 and parsed_messages[0][0] == "user":
+            return parsed_messages[0][1]
+
+        return "\n\n".join([f"{role}: {text}" for role, text in parsed_messages])
     def _get_upload_history_images_flag(self, default: bool = True) -> bool:
         """
         获取是否上传历史对话图片的开关。

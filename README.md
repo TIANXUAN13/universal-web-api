@@ -63,16 +63,19 @@
 
 ### 2. 启动与进入配置页面
 
-1. 双击运行文件夹里的 **`start.bat`** 脚本。
-   * 脚本会自动检测环境并安装必要的依赖，第一次运行可能需要一点时间，请耐心等待。
-   * 脚本还会自动执行 DrissionPage 补丁（用于隐身模式优化）。
-2. 当出现黑色命令行窗口（CMD）并停止滚动时，你会看到类似下面的提示：
+1. 启动脚本：
+   * **Windows**：双击运行 `start.bat`
+   * **macOS / Linux**：终端执行 `bash start.sh`（首次可先执行 `chmod +x start.sh`）
+   * 脚本会自动检测环境并安装必要依赖，首次运行可能需要几分钟。
+   * 脚本会自动执行 DrissionPage 补丁（用于隐身模式优化）。
+2. 当终端输出停止滚动时，你会看到类似下面的提示：
    ```text
    Web UI 已启动，请访问: http://127.0.0.1:8199
    ```
 3. **如何打开配置界面**：
-   * 按住键盘上的 **Ctrl** 键，鼠标点击这个链接。
-   * 或者手动复制 `http://127.0.0.1:8199` 到你的浏览器地址栏打开。
+   * Windows 可按 **Ctrl+点击** 链接；
+   * macOS 可按 **Command+点击** 链接；
+   * 或手动复制 `http://127.0.0.1:8199` 到浏览器打开。
 
 ### 3. 登录账号
 
@@ -296,7 +299,7 @@ curl http://127.0.0.1:8199/v1/chat/completions \
 
 > ⚠️ **高强度防御无法绕过**：对于 Cloudflare 盾等级调得非常高的网站（如 arena.ai），即使开启隐身模式也可能被拦截。arena.ai 在半小时内连续对话约 10 条几乎一定会触发人机验证，真人操作也同样如此。
 
-**DrissionPage 补丁**：`start.bat` 会在依赖安装后自动执行补丁。也可以手动执行：
+**DrissionPage 补丁**：`start.bat` / `start.sh` 会在依赖安装后自动执行补丁。也可以手动执行：
 ```bash
 python patch_drissionpage.py          # 执行补丁
 python patch_drissionpage.py --restore # 恢复原文件
@@ -355,7 +358,7 @@ python patch_drissionpage.py --restore # 恢复原文件
 * **禁止切屏**：尽量不要切换浏览器的标签页或最小化窗口
 * **禁止折叠**：不要手动缩小页面边框或折叠某些按钮
 * **后果**：人为干预会导致脚本逻辑错乱，引发**脚本死锁 (Deadlock)** 或产生预期之外的行为
-* **正确做法**：你可以静静地看着浏览器自动操作，不要动手。如果脚本卡死，请关闭 CMD 窗口，**重启 `start.bat`**
+* **正确做法**：你可以静静地看着浏览器自动操作，不要动手。如果脚本卡死，关闭当前终端后重启脚本（Windows 用 `start.bat`，macOS/Linux 用 `start.sh`）
 
 ### 📉 特殊格式抓取限制
 
@@ -382,16 +385,20 @@ python patch_drissionpage.py --restore # 恢复原文件
 
 ## ❓ 常见问题 (FAQ)
 
-### Q1: 运行 start.bat 后闪退，或者浏览器没有弹出来
+### Q1: 启动脚本后闪退，或者浏览器没有弹出来
 
 程序会按以下优先级自动检测浏览器：Chrome → Edge → Brave → Vivaldi → Opera。如果都未找到，可以在 `.env` 文件中手动指定：
 ```
 BROWSER_PATH=C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe
 ```
+macOS 示例：
+```
+BROWSER_PATH=/Applications/Google Chrome.app/Contents/MacOS/Google Chrome
+```
 
 ### Q2: 网页配置打不开 (http://127.0.0.1:8199 无法访问)
 
-- 检查黑色的命令行窗口是否被关闭了？CMD 窗口必须一直开着
+- 检查运行脚本的终端窗口是否被关闭了？窗口必须一直开着
 - 检查端口 8199 是否被其他软件占用
 
 ### Q3: 为什么发消息给 AI 后，一直显示"等待中"或超时？
@@ -457,6 +464,7 @@ BROWSER_PATH=C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe
 ├── .env                     # 🔒 环境变量
 ├── main.py                  # ▶️ 程序主入口
 ├── start.bat                # 🚀 Windows 一键启动脚本
+├── start.sh                 # 🚀 macOS/Linux 一键启动脚本
 ├── requirements.txt         # 📦 Python 依赖列表
 └── 参数解释.md               # 📝 配置参数详细说明
 ```

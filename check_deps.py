@@ -6,7 +6,29 @@
 """
 
 import sys
+import platform
+import re
 from pathlib import Path
+
+
+def _marker_matches(marker: str) -> bool:
+    """最小化支持 requirements 环境标记（当前覆盖 platform_system）"""
+    marker = marker.strip()
+    if not marker:
+        return True
+
+    current_system = platform.system()
+
+    m_eq = re.search(r"platform_system\s*==\s*['\"]([^'\"]+)['\"]", marker)
+    if m_eq:
+        return current_system == m_eq.group(1)
+
+    m_ne = re.search(r"platform_system\s*!=\s*['\"]([^'\"]+)['\"]", marker)
+    if m_ne:
+        return current_system != m_ne.group(1)
+
+    # 未识别标记时保守处理：不跳过，避免漏检
+    return True
 
 
 def check_dependencies():
@@ -24,6 +46,16 @@ def check_dependencies():
         # 跳过空行和注释
         if not line or line.startswith("#"):
             continue
+
+        # 处理环境标记，例如: pywin32; platform_system == "Windows"
+        if ";" in line:
+            requirement_part, marker_part = line.split(";", 1)
+            if not _marker_matches(marker_part):
+                continue
+            line = requirement_part.strip()
+            if not line:
+                continue
+
         # 提取包名（去掉版本约束）
         pkg_name = line.split(">=")[0].split("<=")[0].split("<")[0].split(">")[0].split("==")[0].split("[")[0].strip()
         if pkg_name:

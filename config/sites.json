@@ -28,13 +28,13 @@
       {
         "key": "message_wrapper",
         "description": "消息完整容器（包裹单条消息的外层元素，用于多节点拼接）",
-        "enabled": false,
+        "enabled": true,
         "required": false
       },
       {
         "key": "generating_indicator",
         "description": "生成中指示器（如停止按钮、加载动画，用于检测是否还在输出）",
-        "enabled": false,
+        "enabled": true,
         "required": false
       }
     ]
@@ -121,7 +121,7 @@
         ],
         "stealth": false,
         "image_extraction": {
-          "enabled": false,
+          "enabled": true,
           "selector": "img",
           "container_selector": null,
           "debounce_seconds": 2,
@@ -522,7 +522,7 @@
           {
             "action": "CLICK",
             "target": "new_chat_btn",
-            "optional": true,
+            "optional": false,
             "value": null
           },
           {

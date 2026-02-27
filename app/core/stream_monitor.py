@@ -207,6 +207,10 @@ class StreamMonitor:
         self._final_complete_text = ""
         self._final_images: List[Dict] = []
         self._generating_checker: Optional[GeneratingStatusCache] = None
+    
+    def _sanitize_for_emit(self, text: str) -> str:
+        """与 SSE 输出保持一致的文本清洗，确保游标按实际输出推进。"""
+        return SSEFormatter._sanitize_output_text(text)
 
     def monitor(self, selector: str, user_input: str = "",
                 completion_id: Optional[str] = None) -> Generator[str, None, None]:
@@ -606,24 +610,27 @@ class StreamMonitor:
                 # 发送当前完整内容
                 full_content = current_text[ctx.active_turn_baseline_len:]
                 if full_content:
-                    yield self.formatter.pack_chunk(full_content, completion_id=completion_id)
-                    ctx.update_after_send(full_content, current_text)
-                    silence_start = time.time()
-                    has_output = True
-                    ctx.content_ever_changed = True
+                    emit_text = self._sanitize_for_emit(full_content)
+                    if emit_text:
+                        yield self.formatter.pack_chunk(emit_text, completion_id=completion_id)
+                        ctx.update_after_send(emit_text, current_text)
+                        silence_start = time.time()
+                        has_output = True
+                        ctx.content_ever_changed = True
                 
                 continue
             
             if diff:
                 if self._should_stop():
                     break
-                ctx.update_after_send(diff, current_text)
-                silence_start = time.time()
-                has_output = True
-                current_interval = min_interval
-                ctx.content_ever_changed = True
-
-                yield self.formatter.pack_chunk(diff, completion_id=completion_id)
+                emit_text = self._sanitize_for_emit(diff)
+                if emit_text:
+                    yield self.formatter.pack_chunk(emit_text, completion_id=completion_id)
+                    ctx.update_after_send(emit_text, current_text)
+                    silence_start = time.time()
+                    has_output = True
+                    current_interval = min_interval
+                    ctx.content_ever_changed = True
             else:
                 if current_text == ctx.last_stable_text:
                     ctx.stable_text_count += 1
@@ -728,9 +735,11 @@ class StreamMonitor:
             if len(final_text) > final_effective_start:
                 remaining = final_text[final_effective_start:]
                 if remaining:
-                    logger.debug(f"[Final] 发送剩余内容: {len(remaining)} 字符")
-                    yield self.formatter.pack_chunk(remaining, completion_id=completion_id)
-                    ctx.sent_content_length += len(remaining)
+                    emit_text = self._sanitize_for_emit(remaining)
+                    if emit_text:
+                        logger.debug(f"[Final] 发送剩余内容: {len(emit_text)} 字符")
+                        yield self.formatter.pack_chunk(emit_text, completion_id=completion_id)
+                        ctx.sent_content_length += len(emit_text)
 
             self._final_complete_text = final_text[ctx.active_turn_baseline_len:]
         else:
@@ -740,8 +749,10 @@ class StreamMonitor:
                 if len(fallback_text) > final_effective_start:
                     remaining = fallback_text[final_effective_start:]
                     if remaining:
-                        yield self.formatter.pack_chunk(remaining, completion_id=completion_id)
-                        ctx.sent_content_length += len(remaining)
+                        emit_text = self._sanitize_for_emit(remaining)
+                        if emit_text:
+                            yield self.formatter.pack_chunk(emit_text, completion_id=completion_id)
+                            ctx.sent_content_length += len(emit_text)
 
                 self._final_complete_text = fallback_text[ctx.active_turn_baseline_len:]
             else:

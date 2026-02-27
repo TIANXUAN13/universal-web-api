@@ -16,6 +16,7 @@ import contextlib
 import os
 import time
 import json
+import re
 import logging
 import sys
 import threading
@@ -499,6 +500,7 @@ class SSEFormatter:
     def pack_chunk(cls, content: str, model: str = "web-browser", 
                    completion_id: str = None) -> str:
         """打包流式 chunk"""
+        content = cls._sanitize_output_text(content)
         chunk_id = completion_id or cls._generate_id()
         data = {
             "id": chunk_id,
@@ -553,6 +555,7 @@ class SSEFormatter:
     
     @staticmethod
     def pack_non_stream(content: str, model: str = "web-browser") -> Dict:
+        content = SSEFormatter._sanitize_output_text(content)
         return {
             "id": f"chatcmpl-{int(time.time() * 1000)}",
             "object": "chat.completion",
@@ -572,6 +575,23 @@ class SSEFormatter:
                 "total_tokens": 0
             }
         }
+    @staticmethod
+    def _sanitize_output_text(text: str) -> str:
+        """
+        统一清洗网页模型常见噪音标记，覆盖 network/dom 两条输出链路。
+        """
+        if not text:
+            return ""
+
+        cleaned = str(text)
+        # DeepSeek 智能搜索尾标与引用标记
+        cleaned = re.sub(r"\[citation:\d+\]", "", cleaned, flags=re.IGNORECASE)
+        cleaned = re.sub(r"FINISHEDSEARCH", "", cleaned, flags=re.IGNORECASE)
+        cleaned = re.sub(r"\bFINISHED\b", "", cleaned, flags=re.IGNORECASE)
+        # 处理跨 chunk 场景：上一个 chunk 去掉 FINISHED 后，当前 chunk 可能以 SEARCH 开头
+        cleaned = re.sub(r"^\s*SEARCH(?=[\u4e00-\u9fff])", "", cleaned, flags=re.IGNORECASE)
+        cleaned = re.sub(r"[ \t]{2,}", " ", cleaned)
+        return cleaned
     @classmethod
     def pack_images_chunk(cls, images: list, completion_id: str = None) -> str:
         """
