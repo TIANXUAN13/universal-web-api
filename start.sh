@@ -32,6 +32,7 @@ PROXY_ENABLED="${PROXY_ENABLED:-false}"
 PROXY_ADDRESS="${PROXY_ADDRESS:-}"
 PROXY_BYPASS="${PROXY_BYPASS:-localhost,127.0.0.1}"
 HEADLESS_LOWER="$(printf '%s' "${HEADLESS}" | tr '[:upper:]' '[:lower:]')"
+PROXY_ENABLED_LOWER="$(printf '%s' "${PROXY_ENABLED}" | tr '[:upper:]' '[:lower:]')"
 
 echo
 echo "  当前配置:"
