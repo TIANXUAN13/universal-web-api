@@ -69,6 +69,49 @@ if [[ ! -x "${VENV_PY}" ]]; then
   exit 1
 fi
 
+ensure_venv_pip() {
+  if "${VENV_PY}" -m pip --version >/dev/null 2>&1; then
+    return 0
+  fi
+
+  echo "[WARN] 虚拟环境中缺少 pip，尝试自动修复..."
+
+  # 方案 1：使用 ensurepip 修复（多数 Linux 可用）
+  if "${VENV_PY}" -m ensurepip --upgrade >/dev/null 2>&1; then
+    "${VENV_PY}" -m pip install --upgrade pip setuptools wheel >/dev/null 2>&1 || true
+  fi
+
+  if "${VENV_PY}" -m pip --version >/dev/null 2>&1; then
+    echo "[OK] pip 修复成功 (ensurepip)"
+    return 0
+  fi
+
+  # 方案 2：升级虚拟环境依赖（Python 3.9+）
+  if python3 -m venv --upgrade-deps venv >/dev/null 2>&1; then
+    if "${VENV_PY}" -m pip --version >/dev/null 2>&1; then
+      echo "[OK] pip 修复成功 (venv --upgrade-deps)"
+      return 0
+    fi
+  fi
+
+  echo "[ERROR] 无法在虚拟环境中启用 pip。"
+  echo "        请先安装系统 pip/venv 组件后重试。"
+  if command -v apt-get >/dev/null 2>&1; then
+    echo "        Debian/Ubuntu: apt-get update && apt-get install -y python3-pip python3-venv"
+  elif command -v dnf >/dev/null 2>&1; then
+    echo "        RHEL/Fedora:   dnf install -y python3-pip python3-virtualenv"
+  elif command -v yum >/dev/null 2>&1; then
+    echo "        CentOS:        yum install -y python3-pip python3-virtualenv"
+  elif command -v apk >/dev/null 2>&1; then
+    echo "        Alpine:        apk add --no-cache py3-pip py3-virtualenv"
+  fi
+  return 1
+}
+
+if ! ensure_venv_pip; then
+  exit 1
+fi
+
 echo "[STEP] 检查依赖"
 REQ_HASH_FILE="venv/.req_hash"
 CURRENT_HASH="$(${VENV_PY} - <<'PY'
