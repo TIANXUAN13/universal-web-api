@@ -27,10 +27,11 @@ fi
 APP_HOST="${APP_HOST:-127.0.0.1}"
 APP_PORT="${APP_PORT:-8199}"
 BROWSER_PORT="${BROWSER_PORT:-9222}"
-HEADLESS="${HEADLESS:-true}"
+HEADLESS="${HEADLESS:-false}"
 PROXY_ENABLED="${PROXY_ENABLED:-false}"
 PROXY_ADDRESS="${PROXY_ADDRESS:-}"
 PROXY_BYPASS="${PROXY_BYPASS:-localhost,127.0.0.1}"
+BROWSER_EXTRA_ARGS="${BROWSER_EXTRA_ARGS:-}"
 HEADLESS_LOWER="$(printf '%s' "${HEADLESS}" | tr '[:upper:]' '[:lower:]')"
 PROXY_ENABLED_LOWER="$(printf '%s' "${PROXY_ENABLED}" | tr '[:upper:]' '[:lower:]')"
 
@@ -40,6 +41,9 @@ echo "    APP_HOST     : ${APP_HOST}"
 echo "    APP_PORT     : ${APP_PORT}"
 echo "    BROWSER_PORT : ${BROWSER_PORT}"
 echo "    HEADLESS     : ${HEADLESS}"
+if [[ -n "${BROWSER_EXTRA_ARGS}" ]]; then
+  echo "    BROWSER_ARGS : ${BROWSER_EXTRA_ARGS}"
+fi
 if [[ "${PROXY_ENABLED_LOWER}" == "true" ]]; then
   echo "    PROXY        : ${PROXY_ADDRESS}"
 else
@@ -182,6 +186,26 @@ finally:
 PY
 }
 
+check_app_port_bindable() {
+  "${VENV_PY}" - "$APP_HOST" "$APP_PORT" <<'PY'
+import socket
+import sys
+
+host = sys.argv[1]
+port = int(sys.argv[2])
+s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+try:
+    s.bind((host, port))
+except OSError as e:
+    print(f"0|{e}")
+else:
+    print("1|ok")
+finally:
+    s.close()
+PY
+}
+
 find_browser() {
   local chosen=""
   if [[ -n "${BROWSER_PATH:-}" && -x "${BROWSER_PATH}" ]]; then
@@ -237,10 +261,16 @@ if [[ "$(check_debug_port)" == "0" ]]; then
   if [[ "${HEADLESS_LOWER}" == "true" ]]; then
     BROWSER_ARGS+=(
       "--headless=new"
-      "--no-sandbox"
       "--disable-gpu"
       "--disable-dev-shm-usage"
       "--disable-software-rasterizer"
+    )
+  fi
+
+  if [[ "$(uname -s)" == "Linux" && "${EUID}" -eq 0 ]]; then
+    BROWSER_ARGS+=(
+      "--no-sandbox"
+      "--disable-dev-shm-usage"
     )
   fi
 
@@ -251,9 +281,43 @@ if [[ "$(check_debug_port)" == "0" ]]; then
     fi
   fi
 
+  if [[ -n "${BROWSER_EXTRA_ARGS}" ]]; then
+    # shellcheck disable=SC2206
+    EXTRA_BROWSER_ARGS=(${BROWSER_EXTRA_ARGS})
+    BROWSER_ARGS+=("${EXTRA_BROWSER_ARGS[@]}")
+  fi
+
+  LOG_DIR="${PROJECT_DIR}/logs"
+  BROWSER_LOG="${LOG_DIR}/browser_start.log"
+  mkdir -p "${LOG_DIR}"
+
   echo "[INFO] 启动浏览器: ${BROWSER_EXE}"
-  "${BROWSER_EXE}" "${BROWSER_ARGS[@]}" about:blank >/dev/null 2>&1 &
-  sleep 4
+  "${BROWSER_EXE}" "${BROWSER_ARGS[@]}" about:blank >"${BROWSER_LOG}" 2>&1 &
+
+  RETRY=0
+  until [[ "${RETRY}" -ge 8 ]]; do
+    if [[ "$(check_debug_port)" == "1" ]]; then
+      echo "[OK] 浏览器调试端口已就绪: 127.0.0.1:${BROWSER_PORT}"
+      break
+    fi
+    sleep 1
+    RETRY=$((RETRY + 1))
+  done
+
+  if [[ "$(check_debug_port)" != "1" ]]; then
+    echo "[WARN] 浏览器调试端口未就绪: 127.0.0.1:${BROWSER_PORT}"
+    echo "       请检查日志: ${BROWSER_LOG}"
+    if [[ -f "${BROWSER_LOG}" ]]; then
+      tail -n 20 "${BROWSER_LOG}" || true
+    fi
+  fi
+fi
+
+PORT_CHECK_RESULT="$(check_app_port_bindable)"
+if [[ "${PORT_CHECK_RESULT%%|*}" != "1" ]]; then
+  echo "[ERROR] 无法监听 ${APP_HOST}:${APP_PORT} (${PORT_CHECK_RESULT#*|})"
+  echo "        请检查端口占用/权限，或在 .env 中修改 APP_HOST / APP_PORT"
+  exit 1
 fi
 
 echo
