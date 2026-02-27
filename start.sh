@@ -35,6 +35,14 @@ BROWSER_EXTRA_ARGS="${BROWSER_EXTRA_ARGS:-}"
 HEADLESS_LOWER="$(printf '%s' "${HEADLESS}" | tr '[:upper:]' '[:lower:]')"
 PROXY_ENABLED_LOWER="$(printf '%s' "${PROXY_ENABLED}" | tr '[:upper:]' '[:lower:]')"
 
+if [[ "$(uname -s)" == "Linux" && "${HEADLESS_LOWER}" != "true" ]]; then
+  if [[ -z "${DISPLAY:-}" && -z "${WAYLAND_DISPLAY:-}" ]]; then
+    echo "[WARN] 检测到 Linux 无图形会话，自动启用 HEADLESS=true"
+    HEADLESS="true"
+    HEADLESS_LOWER="true"
+  fi
+fi
+
 echo
 echo "  当前配置:"
 echo "    APP_HOST     : ${APP_HOST}"
@@ -292,6 +300,7 @@ if [[ "$(check_debug_port)" == "0" ]]; then
   mkdir -p "${LOG_DIR}"
 
   echo "[INFO] 启动浏览器: ${BROWSER_EXE}"
+  echo "[INFO] 浏览器参数: ${BROWSER_ARGS[*]}"
   "${BROWSER_EXE}" "${BROWSER_ARGS[@]}" about:blank >"${BROWSER_LOG}" 2>&1 &
 
   RETRY=0
@@ -303,6 +312,36 @@ if [[ "$(check_debug_port)" == "0" ]]; then
     sleep 1
     RETRY=$((RETRY + 1))
   done
+
+  if [[ "$(check_debug_port)" != "1" ]]; then
+    if [[ "$(uname -s)" == "Linux" ]]; then
+      FALLBACK_PROFILE_DIR="${PROJECT_DIR}/chrome_profile_fallback"
+      mkdir -p "${FALLBACK_PROFILE_DIR}"
+      echo "[WARN] Linux 模式下首次启动失败，尝试兼容参数重试..."
+      BROWSER_ARGS+=(
+        "--no-sandbox"
+        "--disable-setuid-sandbox"
+        "--disable-dev-shm-usage"
+        "--remote-debugging-address=127.0.0.1"
+        "--user-data-dir=${FALLBACK_PROFILE_DIR}"
+      )
+      if [[ "${HEADLESS_LOWER}" != "true" ]]; then
+        BROWSER_ARGS+=("--headless=new")
+      fi
+      echo "[INFO] 重试参数: ${BROWSER_ARGS[*]}"
+      "${BROWSER_EXE}" "${BROWSER_ARGS[@]}" about:blank >>"${BROWSER_LOG}" 2>&1 &
+
+      RETRY=0
+      until [[ "${RETRY}" -ge 8 ]]; do
+        if [[ "$(check_debug_port)" == "1" ]]; then
+          echo "[OK] 浏览器调试端口已就绪(重试): 127.0.0.1:${BROWSER_PORT}"
+          break
+        fi
+        sleep 1
+        RETRY=$((RETRY + 1))
+      done
+    fi
+  fi
 
   if [[ "$(check_debug_port)" != "1" ]]; then
     echo "[WARN] 浏览器调试端口未就绪: 127.0.0.1:${BROWSER_PORT}"
