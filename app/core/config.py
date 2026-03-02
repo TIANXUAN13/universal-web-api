@@ -125,6 +125,10 @@ class AppConfig:
     @staticmethod
     def get_helper_model() -> str:
         return os.getenv("HELPER_MODEL", "gpt-4")
+        
+    @staticmethod
+    def get_helper_api_provider() -> str:
+        return os.getenv("HELPER_API_PROVIDER", "auto").lower()
     
     @staticmethod
     def get_max_html_chars() -> int:
