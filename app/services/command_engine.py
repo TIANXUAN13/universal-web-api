@@ -7,10 +7,12 @@ app/services/command_engine.py - 命令引擎
 - 动作执行调度
 - 高级模式脚本执行（JavaScript / Python）
 
-存储位置：sites.json → _global.commands
+存储位置：config/commands.json
 """
 
 import copy
+import json
+import os
 import random
 import threading
 import time
@@ -38,6 +40,7 @@ TRIGGER_TYPES = {
     "error_count": "连续错误次数达到阈值",
     "idle_timeout": "标签页空闲超过指定时间（秒）",
     "page_check": "页面出现指定内容（如 Cloudflare 验证）",
+    "command_triggered": "当指定命令触发后执行",
 }
 
 ACTION_TYPES = {
@@ -46,6 +49,8 @@ ACTION_TYPES = {
     "new_chat": "点击新建对话按钮",
     "run_js": "在页面中执行 JavaScript",
     "wait": "等待指定秒数",
+    "execute_preset": "切换预设",
+    "execute_workflow": "执行工作流",
     "switch_preset": "切换标签页预设",
     "navigate": "导航到指定 URL",
     "switch_proxy": "切换代理节点（Clash）",
@@ -68,6 +73,7 @@ def get_default_command() -> Dict[str, Any]:
         "trigger": {
             "type": "request_count",
             "value": 10,
+            "command_id": "",
             "scope": "all",
             "domain": "",
             "tab_index": None,
@@ -91,7 +97,12 @@ class CommandEngine:
     def __init__(self):
         self._config_engine = None
         self._browser = None
+        self._commands_file = None
+        self._commands_mtime = 0.0
+        self._commands_loaded = False
+        self._commands_cache: List[Dict[str, Any]] = []
         self._lock = threading.Lock()
+        self._commands_lock = threading.RLock()
 
         # 触发状态：{(command_id, tab_id): {"req": int, "err": int}}
         self._trigger_states: Dict[tuple, Dict[str, int]] = {}
@@ -114,17 +125,79 @@ class CommandEngine:
             self._browser = get_browser(auto_connect=False)
         return self._browser
 
+    def _get_commands_file(self) -> str:
+        if self._commands_file is None:
+            from app.services.config_engine import ConfigConstants
+            self._commands_file = ConfigConstants.COMMANDS_FILE
+        return self._commands_file
+
+    def _read_commands_file(self) -> List[Dict]:
+        commands_file = self._get_commands_file()
+        if not os.path.exists(commands_file):
+            return []
+
+        try:
+            with open(commands_file, "r", encoding="utf-8") as f:
+                data = json.load(f)
+
+            if isinstance(data, dict):
+                data = data.get("commands", [])
+
+            if isinstance(data, list):
+                return data
+
+            logger.warning(f"命令配置文件格式无效: {commands_file}")
+            return []
+        except json.JSONDecodeError as e:
+            logger.error(f"命令配置文件格式错误: {e}")
+            return []
+        except Exception as e:
+            logger.error(f"加载命令配置失败: {e}")
+            return []
+
+    def _refresh_commands_if_changed(self, force: bool = False):
+        commands_file = self._get_commands_file()
+        current_mtime = os.path.getmtime(commands_file) if os.path.exists(commands_file) else 0.0
+
+        if force or not self._commands_loaded or current_mtime != self._commands_mtime:
+            self._commands_cache = self._read_commands_file()
+            self._commands_mtime = current_mtime
+            self._commands_loaded = True
+
+    def _save_commands(self, commands: List[Dict]) -> bool:
+        commands_file = self._get_commands_file()
+        tmp_file = commands_file + ".tmp"
+
+        try:
+            with self._commands_lock:
+                commands_snapshot = copy.deepcopy(commands)
+                os.makedirs(os.path.dirname(commands_file), exist_ok=True)
+                with open(tmp_file, "w", encoding="utf-8") as f:
+                    json.dump({"commands": commands_snapshot}, f, indent=2, ensure_ascii=False)
+                    f.flush()
+                    os.fsync(f.fileno())
+
+                os.replace(tmp_file, commands_file)
+                self._commands_mtime = os.path.getmtime(commands_file) if os.path.exists(commands_file) else 0.0
+                self._commands_loaded = True
+                self._commands_cache = commands_snapshot
+                return True
+        except Exception as e:
+            logger.error(f"保存命令配置失败: {e}")
+            try:
+                if os.path.exists(tmp_file):
+                    os.remove(tmp_file)
+            except Exception:
+                pass
+            return False
+
     # ================= CRUD =================
 
     def _load_commands(self) -> List[Dict]:
         """从配置引擎加载命令列表（可变引用）"""
-        engine = self._get_config_engine()
-        engine.refresh_if_changed()
-        commands = engine.global_config.get("commands")
-        if commands is None:
-            commands = []
-            engine.global_config.set("commands", commands)
-        return commands
+        self._get_config_engine()
+        self._refresh_commands_if_changed()
+        return self._commands_cache
 
     def list_commands(self) -> List[Dict]:
         """获取所有命令（深拷贝）"""
@@ -137,73 +210,68 @@ class CommandEngine:
         return None
 
     def add_command(self, command: Dict = None) -> Dict:
-        engine = self._get_config_engine()
-
         if command is None:
             command = get_default_command()
         else:
             if not command.get("id"):
                 command["id"] = _new_command_id()
 
-        commands = self._load_commands()
-        commands.append(command)
-        engine.global_config.set("commands", commands)
-        engine.save_config()
+        with self._commands_lock:
+            commands = self._load_commands()
+            commands.append(command)
+            self._save_commands(commands)
 
         logger.info(f"✅ 命令已添加: {command.get('name')} ({command['id']})")
         return copy.deepcopy(command)
 
     def update_command(self, command_id: str, updates: Dict) -> Optional[Dict]:
-        engine = self._get_config_engine()
-        commands = self._load_commands()
+        with self._commands_lock:
+            commands = self._load_commands()
 
-        for i, cmd in enumerate(commands):
-            if cmd.get("id") == command_id:
-                updates.pop("id", None)
-                cmd.update(updates)
-                commands[i] = cmd
-                engine.global_config.set("commands", commands)
-                engine.save_config()
-                logger.info(f"✅ 命令已更新: {cmd.get('name')} ({command_id})")
-                return copy.deepcopy(cmd)
+            for i, cmd in enumerate(commands):
+                if cmd.get("id") == command_id:
+                    updates.pop("id", None)
+                    cmd.update(updates)
+                    commands[i] = cmd
+                    self._save_commands(commands)
+                    logger.debug(f"✅ 命令已更新: {cmd.get('name')} ({command_id})")
+                    return copy.deepcopy(cmd)
 
         return None
 
     def delete_command(self, command_id: str) -> bool:
-        engine = self._get_config_engine()
-        commands = self._load_commands()
-        new_commands = [c for c in commands if c.get("id") != command_id]
+        with self._commands_lock:
+            commands = self._load_commands()
+            new_commands = [c for c in commands if c.get("id") != command_id]
 
-        if len(new_commands) == len(commands):
-            return False
+            if len(new_commands) == len(commands):
+                return False
 
-        engine.global_config.set("commands", new_commands)
-        engine.save_config()
+            self._save_commands(new_commands)
 
-        # 清理触发状态
-        with self._lock:
-            keys_to_remove = [k for k in self._trigger_states if k[0] == command_id]
-            for k in keys_to_remove:
-                del self._trigger_states[k]
+            # 清理触发状态
+            with self._lock:
+                keys_to_remove = [k for k in self._trigger_states if k[0] == command_id]
+                for k in keys_to_remove:
+                    del self._trigger_states[k]
 
         logger.info(f"✅ 命令已删除: {command_id}")
         return True
 
     def reorder_commands(self, command_ids: List[str]) -> bool:
-        engine = self._get_config_engine()
-        commands = self._load_commands()
-        cmd_map = {c["id"]: c for c in commands}
-        new_commands = []
+        with self._commands_lock:
+            commands = self._load_commands()
+            cmd_map = {c["id"]: c for c in commands}
+            new_commands = []
 
-        for cid in command_ids:
-            if cid in cmd_map:
-                new_commands.append(cmd_map.pop(cid))
+            for cid in command_ids:
+                if cid in cmd_map:
+                    new_commands.append(cmd_map.pop(cid))
 
-        for remaining in cmd_map.values():
-            new_commands.append(remaining)
+            for remaining in cmd_map.values():
+                new_commands.append(remaining)
 
-        engine.global_config.set("commands", new_commands)
-        engine.save_config()
+            self._save_commands(new_commands)
         return True
 
     # ================= 触发检查 =================
@@ -320,15 +388,80 @@ class CommandEngine:
         except Exception:
             return False
 
+    def _matches_scope(self, command: Dict, session: 'TabSession') -> bool:
+        trigger = command.get("trigger", {})
+        scope = trigger.get("scope", "all")
+
+        if scope == "domain":
+            target_domain = trigger.get("domain", "")
+            if target_domain and session.current_domain:
+                return target_domain in session.current_domain
+            return not target_domain
+
+        if scope == "tab":
+            target_index = trigger.get("tab_index")
+            return target_index is None or session.persistent_index == target_index
+
+        return True
+
+    def _trigger_chained_commands(
+        self,
+        source_command: Dict,
+        session: 'TabSession',
+        chain: Optional[List[str]] = None,
+    ):
+        source_id = source_command.get("id")
+        if not source_id:
+            return
+
+        chain = list(chain or [])
+        next_chain = chain + [source_id]
+
+        try:
+            commands = self._load_commands()
+        except Exception as e:
+            logger.debug(f"链式命令加载失败，跳过: {e}")
+            return
+
+        for cmd in commands:
+            if not cmd.get("enabled", True):
+                continue
+
+            target_id = cmd.get("id")
+            trigger = cmd.get("trigger", {})
+            if trigger.get("type") != "command_triggered":
+                continue
+            if trigger.get("command_id") != source_id:
+                continue
+            if not target_id or target_id in next_chain:
+                continue
+            if not self._matches_scope(cmd, session):
+                continue
+
+            exec_key = (target_id, session.id)
+            if exec_key in self._executing:
+                continue
+
+            logger.info(
+                f"[CMD] 链式触发: {source_command.get('name')} -> {cmd.get('name')} "
+                f"(tab={session.id})"
+            )
+            self._execute_command_async(cmd, session, chain=next_chain)
+
     # ================= 动作执行 =================
 
-    def _execute_command_async(self, command: Dict, session: 'TabSession'):
+    def _execute_command_async(
+        self,
+        command: Dict,
+        session: 'TabSession',
+        chain: Optional[List[str]] = None,
+    ):
         exec_key = (command["id"], session.id)
         self._executing.add(exec_key)
 
         def _run():
             try:
-                self._execute_command(command, session)
+                self._execute_command(command, session, chain=chain)
             except Exception as e:
                 logger.error(f"[CMD] 命令执行失败 [{command.get('name')}]: {e}")
             finally:
@@ -340,11 +473,16 @@ class CommandEngine:
         )
         thread.start()
 
-    def _execute_command(self, command: Dict, session: 'TabSession'):
+    def _execute_command(
+        self,
+        command: Dict,
+        session: 'TabSession',
+        chain: Optional[List[str]] = None,
+    ):
         cmd_name = command.get("name", "未命名")
         mode = command.get("mode", "simple")
 
-        logger.info(f"[CMD] ▶ 执行: {cmd_name} (mode={mode}, tab={session.id})")
+        logger.debug(f"[CMD] ▶ 执行: {cmd_name} (mode={mode}, tab={session.id})")
 
         self._update_trigger_stats(command["id"])
 
@@ -353,7 +491,8 @@ class CommandEngine:
         else:
             self._execute_simple(command, session)
 
-        logger.info(f"[CMD] ✅ 完成: {cmd_name}")
+        logger.debug(f"[CMD] ✅ 完成: {cmd_name}")
+        self._trigger_chained_commands(command, session, chain=chain)
 
     def _execute_simple(self, command: Dict, session: 'TabSession'):
         actions = command.get("actions", [])
@@ -422,17 +561,11 @@ class CommandEngine:
             time.sleep(seconds)
             logger.debug(f"[CMD] 等待 {seconds}s")
 
-        elif action_type == "switch_preset":
-            preset_name = action.get("preset_name", "")
-            if preset_name:
-                try:
-                    browser = self._get_browser()
-                    browser.tab_pool.set_tab_preset(
-                        session.persistent_index, preset_name
-                    )
-                    logger.debug(f"[CMD] 预设已切换: {preset_name}")
-                except Exception as e:
-                    logger.warning(f"[CMD] 切换预设失败: {e}")
+        elif action_type in {"execute_preset", "switch_preset"}:
+            self._execute_preset_action(action, session)
+
+        elif action_type == "execute_workflow":
+            self._execute_workflow_action(action, session)
 
         elif action_type == "navigate":
             url = action.get("url", "")
@@ -449,6 +582,61 @@ class CommandEngine:
 
         else:
             logger.warning(f"[CMD] 未知动作类型: {action_type}")
+
+    def _execute_preset_action(self, action: Dict, session: 'TabSession'):
+        """执行预设动作，兼容旧版 switch_preset。"""
+        preset_name = str(action.get("preset_name", "")).strip()
+        if not preset_name:
+            logger.warning("[CMD] 预设名称为空，跳过执行")
+            return
+
+        try:
+            browser = self._get_browser()
+            browser.tab_pool.set_tab_preset(
+                session.persistent_index, preset_name
+            )
+            logger.debug(f"[CMD] 预设已切换: {preset_name}")
+        except Exception as e:
+            logger.warning(f"[CMD] 切换预设失败: {e}")
+
+    def _execute_workflow_action(self, action: Dict, session: 'TabSession'):
+        """在当前标签页上立即执行目标预设的工作流。"""
+        try:
+            browser = self._get_browser()
+            preset_name = str(action.get("preset_name", "")).strip()
+            prompt = str(action.get("prompt", ""))
+
+            if preset_name:
+                ok = browser.tab_pool.set_tab_preset(session.persistent_index, preset_name)
+                if not ok:
+                    logger.warning(f"[CMD] 切换到执行预设失败: {preset_name}")
+                    return
+
+            effective_preset = session.preset_name or "主预设"
+            logger.debug(
+                f"[CMD] 开始执行工作流: tab=#{session.persistent_index}, preset={effective_preset}"
+            )
+
+            messages = [{"role": "user", "content": prompt}]
+            chunks = list(browser._execute_workflow_non_stream(session, messages))
+
+            for chunk in chunks:
+                payload = chunk[6:].strip() if chunk.startswith("data: ") else chunk
+                if not payload:
+                    continue
+                try:
+                    data = json.loads(payload)
+                except Exception:
+                    continue
+                if isinstance(data, dict) and data.get("error"):
+                    logger.warning(f"[CMD] 工作流返回错误: {data['error']}")
+                    return
+
+            logger.debug(
+                f"[CMD] 工作流执行完成: tab=#{session.persistent_index}, preset={effective_preset}"
+            )
+        except Exception as e:
+            logger.warning(f"[CMD] 执行工作流失败: {e}")
     # ================= 代理切换 =================
 
     def _execute_switch_proxy(self, action: Dict, session: 'TabSession'):
@@ -624,17 +812,16 @@ class CommandEngine:
     # ================= 统计 =================
 
     def _update_trigger_stats(self, command_id: str):
-        engine = self._get_config_engine()
-        commands = self._load_commands()
+        with self._commands_lock:
+            commands = self._load_commands()
 
-        for cmd in commands:
-            if cmd.get("id") == command_id:
-                cmd["last_triggered"] = time.time()
-                cmd["trigger_count"] = cmd.get("trigger_count", 0) + 1
-                break
+            for cmd in commands:
+                if cmd.get("id") == command_id:
+                    cmd["last_triggered"] = time.time()
+                    cmd["trigger_count"] = cmd.get("trigger_count", 0) + 1
+                    break
 
-        engine.global_config.set("commands", commands)
-        engine.save_config()
+            self._save_commands(commands)
 
     # ================= 元信息 =================
 

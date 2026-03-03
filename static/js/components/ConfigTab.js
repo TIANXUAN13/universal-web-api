@@ -325,6 +325,7 @@ window.ConfigTab = {
                     :workflow="presetConfig.workflow || []"
                     :selectors="presetConfig.selectors || {}"
                     :current-domain="currentDomain"
+                    :selected-preset="selectedPreset"
                     :collapsed="workflowCollapsed"
                     @update:collapsed="workflowCollapsed = $event"
                     @add-step="$emit('add-step')"

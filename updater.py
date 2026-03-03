@@ -45,6 +45,8 @@ DEFAULT_PRESERVE = [
     "updater.py"
 ]
 
+COMMANDS_CONFIG_PATH = Path("config") / "commands.json"
+
 class Colors:
     CYAN = '\033[96m'
     GREEN = '\033[92m'
@@ -504,6 +506,81 @@ def should_preserve(path: Path, preserve_patterns: list) -> bool:
     
     return False
 
+def load_commands_config(path: Path) -> list:
+    """加载命令配置，兼容 list 和 {commands: [...]} 两种格式"""
+    if not path.exists():
+        return []
+
+    try:
+        with open(path, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+
+        if isinstance(data, dict):
+            data = data.get("commands", [])
+
+        if isinstance(data, list):
+            return [cmd for cmd in data if isinstance(cmd, dict)]
+
+        log_warning(f"命令配置格式无效，按空列表处理: {path}")
+        return []
+    except Exception as e:
+        log_warning(f"加载命令配置失败，按空列表处理: {path} ({e})")
+        return []
+
+def merge_commands(existing: list, incoming: list) -> tuple[list, int]:
+    """保留现有命令，只追加不存在的命令"""
+    merged = list(existing or [])
+    appended = 0
+
+    seen_ids = {
+        str(cmd.get("id", "")).strip()
+        for cmd in merged
+        if isinstance(cmd, dict) and str(cmd.get("id", "")).strip()
+    }
+    seen_names = {
+        str(cmd.get("name", "")).strip()
+        for cmd in merged
+        if isinstance(cmd, dict) and str(cmd.get("name", "")).strip()
+    }
+
+    for cmd in incoming or []:
+        if not isinstance(cmd, dict):
+            continue
+
+        command_id = str(cmd.get("id", "")).strip()
+        command_name = str(cmd.get("name", "")).strip()
+
+        if command_id and command_id in seen_ids:
+            continue
+        if command_name and command_name in seen_names:
+            continue
+
+        merged.append(cmd)
+        appended += 1
+
+        if command_id:
+            seen_ids.add(command_id)
+        if command_name:
+            seen_names.add(command_name)
+
+    return merged, appended
+
+def merge_command_file(src_path: Path, dst_path: Path):
+    """合并命令配置文件，避免更新时覆盖用户自定义命令"""
+    incoming = load_commands_config(src_path)
+    existing = load_commands_config(dst_path)
+    merged, appended = merge_commands(existing, incoming)
+    had_existing = dst_path.exists()
+
+    dst_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(dst_path, 'w', encoding='utf-8') as f:
+        json.dump({"commands": merged}, f, indent=2, ensure_ascii=False)
+
+    if had_existing:
+        log_info(f"命令配置已合并: 保留 {len(existing)} 条，追加 {appended} 条")
+    else:
+        log_info(f"命令配置已写入: {len(merged)} 条")
+
 def extract_and_update(zip_path: Path, project_dir: Path, preserve: list) -> bool:
     """解压并更新"""
     try:
@@ -534,6 +611,11 @@ def extract_and_update(zip_path: Path, project_dir: Path, preserve: list) -> boo
                 
                 rel_path = src_item.relative_to(source_dir)
                 dst_item = project_dir / rel_path
+
+                if rel_path == COMMANDS_CONFIG_PATH:
+                    merge_command_file(src_item, dst_item)
+                    updated += 1
+                    continue
                 
                 if should_preserve(rel_path, preserve):
                     skipped += 1

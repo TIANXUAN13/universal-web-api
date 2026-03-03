@@ -1,0 +1,118 @@
+{
+  "commands": [
+    {
+      "name": "自动清除cookie",
+      "enabled": true,
+      "mode": "simple",
+      "trigger": {
+        "type": "request_count",
+        "value": 2,
+        "scope": "domain",
+        "domain": "arena.ai",
+        "tab_index": null,
+        "command_id": ""
+      },
+      "actions": [
+        {
+          "type": "clear_cookies"
+        },
+        {
+          "type": "refresh_page"
+        },
+        {
+          "type": "execute_workflow",
+          "seconds": 1,
+          "prompt": "",
+          "preset_name": "1"
+        }
+      ],
+      "script": "",
+      "script_lang": "javascript",
+      "id": "cmd_58625812",
+      "last_triggered": 1772537512.6633134,
+      "trigger_count": 7
+    },
+    {
+      "name": "自动过CF盾",
+      "enabled": true,
+      "mode": "simple",
+      "trigger": {
+        "type": "page_check",
+        "value": "Cloudflare",
+        "scope": "domain",
+        "domain": "arena.ai",
+        "tab_index": null,
+        "command_id": ""
+      },
+      "actions": [
+        {
+          "type": "wait",
+          "seconds": 2
+        },
+        {
+          "type": "execute_workflow",
+          "preset_name": "1",
+          "prompt": ""
+        }
+      ],
+      "script": "",
+      "script_lang": "javascript",
+      "id": "cmd_b34a8efd",
+      "last_triggered": 1772537512.6565351,
+      "trigger_count": 64
+    },
+    {
+      "name": "切换到对应模型",
+      "enabled": true,
+      "mode": "simple",
+      "trigger": {
+        "type": "command_triggered",
+        "value": "",
+        "scope": "domain",
+        "domain": "arena.ai",
+        "tab_index": null,
+        "command_id": "cmd_58625812"
+      },
+      "actions": [
+        {
+          "type": "execute_workflow",
+          "prompt": "",
+          "preset_name": "选择模型"
+        }
+      ],
+      "script": "",
+      "script_lang": "javascript",
+      "id": "cmd_aab3f583",
+      "last_triggered": 1772537715.0744512,
+      "trigger_count": 11
+    },
+    {
+      "name": "新命令",
+      "enabled": false,
+      "mode": "simple",
+      "trigger": {
+        "type": "request_count",
+        "value": 10,
+        "scope": "all",
+        "domain": "",
+        "tab_index": null,
+        "command_id": ""
+      },
+      "actions": [
+        {
+          "type": "switch_proxy",
+          "clash_api": "http://127.0.0.1:9097",
+          "clash_secret": "1",
+          "selector": "高质量轮询",
+          "mode": "round_robin",
+          "node_name": "",
+          "exclude_keywords": "DIRECT,REJECT,GLOBAL,自动选择,故障转移",
+          "refresh_after": true
+        }
+      ],
+      "script": "",
+      "script_lang": "javascript",
+      "id": "cmd_a8479117"
+    }
+  ]
+}

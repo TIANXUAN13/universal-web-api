@@ -43,6 +43,7 @@ class CommandCreateRequest(BaseModel):
     mode: str = Field(default="simple")
     trigger: dict = Field(default_factory=lambda: {
         "type": "request_count", "value": 10,
+        "command_id": "",
         "scope": "all", "domain": "", "tab_index": None
     })
     actions: list = Field(default_factory=lambda: [
@@ -106,6 +107,15 @@ async def create_command(
     return {"success": True, "command": cmd}
 
 
+@router.put("/api/commands/reorder")
+async def reorder_commands(
+    body: CommandReorderRequest,
+    authenticated: bool = Depends(verify_auth)
+):
+    success = command_engine.reorder_commands(body.command_ids)
+    return {"success": success}
+
+
 @router.put("/api/commands/{command_id}")
 async def update_command(
     command_id: str,
@@ -125,15 +135,6 @@ async def delete_command(command_id: str, authenticated: bool = Depends(verify_a
     if not success:
         raise HTTPException(status_code=404, detail="命令不存在")
     return {"success": True}
-
-
-@router.put("/api/commands/reorder")
-async def reorder_commands(
-    body: CommandReorderRequest,
-    authenticated: bool = Depends(verify_auth)
-):
-    success = command_engine.reorder_commands(body.command_ids)
-    return {"success": success}
 
 
 @router.post("/api/commands/{command_id}/test")
@@ -164,7 +165,7 @@ async def test_command(command_id: str, authenticated: bool = Depends(verify_aut
             command_engine._execute_command(cmd, session)
             return {"success": True, "message": f"命令已在标签页 #{tab_index} 上执行"}
         finally:
-            pool.release(session.id)
+            pool.release(session.id, check_triggers=False)
 
     except HTTPException:
         raise

@@ -36,6 +36,7 @@ class ConfigConstants:
     """配置引擎常量"""
     _PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
     CONFIG_FILE = os.getenv("SITES_CONFIG_FILE", os.path.join(_PROJECT_ROOT, "config", "sites.json"))
+    COMMANDS_FILE = os.getenv("COMMANDS_CONFIG_FILE", os.path.join(_PROJECT_ROOT, "config", "commands.json"))
     IMAGE_PRESETS_FILE = os.path.join(_PROJECT_ROOT, "config", "image_presets.json")
     
     MAX_HTML_CHARS = int(os.getenv("MAX_HTML_CHARS", "120000"))
@@ -109,6 +110,7 @@ class ConfigEngine:
         
         # 加载配置
         self._load_config()
+        self._migrate_global_commands()
         
         # 处理器
         self.html_cleaner = HTMLCleaner()
@@ -242,6 +244,108 @@ class ConfigEngine:
             except Exception:
                 pass
             return False
+
+    def _load_commands_file(self) -> List[Dict[str, Any]]:
+        """加载独立命令配置文件"""
+        commands_file = ConfigConstants.COMMANDS_FILE
+        if not os.path.exists(commands_file):
+            return []
+
+        try:
+            with open(commands_file, "r", encoding="utf-8") as f:
+                data = json.load(f)
+
+            if isinstance(data, dict):
+                data = data.get("commands", [])
+
+            if isinstance(data, list):
+                return data
+
+            logger.warning(f"命令配置文件格式无效: {commands_file}")
+            return []
+        except json.JSONDecodeError as e:
+            logger.error(f"命令配置文件格式错误: {e}")
+            return []
+        except Exception as e:
+            logger.error(f"加载命令配置失败: {e}")
+            return []
+
+    def _save_commands_file(self, commands: List[Dict[str, Any]]) -> bool:
+        """保存独立命令配置文件"""
+        commands_file = ConfigConstants.COMMANDS_FILE
+        tmp_file = commands_file + ".tmp"
+
+        try:
+            os.makedirs(os.path.dirname(commands_file), exist_ok=True)
+            payload = {"commands": commands}
+
+            with open(tmp_file, "w", encoding="utf-8") as f:
+                json.dump(payload, f, indent=2, ensure_ascii=False)
+                f.flush()
+                os.fsync(f.fileno())
+
+            os.replace(tmp_file, commands_file)
+            logger.info(f"命令配置已保存: {commands_file}")
+            return True
+        except Exception as e:
+            logger.error(f"保存命令配置失败: {e}")
+            try:
+                if os.path.exists(tmp_file):
+                    os.remove(tmp_file)
+            except Exception:
+                pass
+            return False
+
+    @staticmethod
+    def _merge_commands(existing: List[Dict[str, Any]], incoming: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """保留已有命令，仅追加不存在的命令"""
+        merged = list(existing or [])
+        seen_ids = {
+            str(cmd.get("id", "")).strip()
+            for cmd in merged
+            if isinstance(cmd, dict) and str(cmd.get("id", "")).strip()
+        }
+        seen_names = {
+            str(cmd.get("name", "")).strip()
+            for cmd in merged
+            if isinstance(cmd, dict) and str(cmd.get("name", "")).strip()
+        }
+
+        for cmd in incoming or []:
+            if not isinstance(cmd, dict):
+                continue
+
+            command_id = str(cmd.get("id", "")).strip()
+            command_name = str(cmd.get("name", "")).strip()
+
+            if command_id and command_id in seen_ids:
+                continue
+            if command_name and command_name in seen_names:
+                continue
+
+            merged.append(cmd)
+            if command_id:
+                seen_ids.add(command_id)
+            if command_name:
+                seen_names.add(command_name)
+
+        return merged
+
+    def _migrate_global_commands(self):
+        """将旧版 _global.commands 迁移到独立文件"""
+        legacy_commands = self.global_config.get("commands", [])
+        existing_commands = self._load_commands_file()
+
+        if not isinstance(legacy_commands, list):
+            legacy_commands = []
+
+        merged_commands = self._merge_commands(existing_commands, legacy_commands)
+
+        if legacy_commands or not os.path.exists(ConfigConstants.COMMANDS_FILE):
+            self._save_commands_file(merged_commands)
+
+        if self.global_config.remove("commands"):
+            self._save_config()
     # ================= 预设系统核心方法 =================
     
     def _migrate_to_presets(self):

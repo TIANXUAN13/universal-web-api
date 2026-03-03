@@ -30,13 +30,12 @@ class GlobalConfigManager:
     
     管理 _global 节点中的配置，包括：
     - selector_definitions: 元素定义列表
-    - commands: 自动化命令列表
     - 以及任意扩展字段（通过 get/set 访问）
     """
     
     def __init__(self):
         self._selector_definitions: List[SelectorDefinition] = get_default_selector_definitions()
-        self._extra: Dict[str, Any] = {}  # 通用扩展存储（commands 等）
+        self._extra: Dict[str, Any] = {}  # 通用扩展存储
     
     def load(self, global_section: Dict[str, Any]):
         """从 _global 节点加载配置"""
@@ -138,6 +137,13 @@ class GlobalConfigManager:
     def set(self, key: str, value: Any):
         """设置通用配置值"""
         self._extra[key] = value
+
+    def remove(self, key: str) -> bool:
+        """删除通用配置值"""
+        if key not in self._extra:
+            return False
+        del self._extra[key]
+        return True
     
     def to_dict(self) -> Dict[str, Any]:
         """导出为字典（用于保存）"""

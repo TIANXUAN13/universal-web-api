@@ -711,7 +711,7 @@ class BrowserCore:
                 
                 selector = selectors.get(target_key, '')
                 
-                if not selector and action not in ("WAIT", "KEY_PRESS"):
+                if not selector and action not in ("WAIT", "KEY_PRESS", "COORD_CLICK"):
                     if optional:
                         continue
                     else:

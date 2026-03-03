@@ -6,6 +6,7 @@ window.WorkflowPanel = {
         workflow: { type: Array, required: true },
         selectors: { type: Object, required: true },
         currentDomain: { type: String, default: null },
+        selectedPreset: { type: String, default: '主预设' },
         collapsed: { type: Boolean, default: false }
     },
     emits: ['update:collapsed', 'add-step', 'remove-step', 'move-step', 'action-change', 'show-templates'],
@@ -26,7 +27,10 @@ window.WorkflowPanel = {
                 const response = await fetch('/api/workflow-editor/inject', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ target_domain: this.currentDomain })
+                    body: JSON.stringify({
+                        target_domain: this.currentDomain,
+                        preset_name: this.selectedPreset
+                    })
                 });
                 const result = await response.json();
                 if (result.success) {
@@ -102,6 +106,7 @@ window.WorkflowPanel = {
                                     class="border dark:border-gray-600 px-2 py-1.5 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-400 focus:border-transparent w-full text-sm mt-1 bg-white dark:bg-gray-700 text-gray-900 dark:text-white">
                                 <option value="FILL_INPUT">填入内容</option>
                                 <option value="CLICK">点击元素</option>
+                                <option value="COORD_CLICK">坐标点击</option>
                                 <option value="STREAM_WAIT">流式等待</option>
                                 <option value="WAIT">等待</option>
                                 <option value="KEY_PRESS">按键</option>
@@ -111,13 +116,37 @@ window.WorkflowPanel = {
                         <!-- 目标/参数 -->
                         <div class="flex-1">
                             <label class="text-xs font-medium text-gray-500 dark:text-gray-400">
-                                {{ ['FILL_INPUT', 'CLICK', 'STREAM_WAIT'].includes(step.action) ? '目标选择器' : '参数' }}
+                                {{ ['FILL_INPUT', 'CLICK', 'STREAM_WAIT'].includes(step.action) ? '目标选择器' : step.action === 'COORD_CLICK' ? '坐标参数' : '参数' }}
                             </label>
                             <select v-if="['FILL_INPUT', 'CLICK', 'STREAM_WAIT'].includes(step.action)" v-model="step.target"
                                     class="border dark:border-gray-600 px-2 py-1.5 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-400 focus:border-transparent w-full mt-1 text-sm bg-white dark:bg-gray-700 text-gray-900 dark:text-white">
                                 <option value="" disabled>选择选择器...</option>
                                 <option v-for="(v, k) in selectors" :key="k" :value="k">{{ k }} ({{ v || '未设置' }})</option>
                             </select>
+                            <div v-else-if="step.action === 'COORD_CLICK'" class="flex items-center gap-2 mt-1 flex-wrap">
+                                <input :value="step.value?.x ?? ''"
+                                       @input="step.value = { ...(step.value || {}), x: Number($event.target.value) }"
+                                       type="number"
+                                       step="1"
+                                       class="border dark:border-gray-600 px-2 py-1.5 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-400 focus:border-transparent w-28 text-sm bg-white dark:bg-gray-700 text-gray-900 dark:text-white"
+                                       placeholder="X viewport">
+                                <input :value="step.value?.y ?? ''"
+                                       @input="step.value = { ...(step.value || {}), y: Number($event.target.value) }"
+                                       type="number"
+                                       step="1"
+                                       class="border dark:border-gray-600 px-2 py-1.5 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-400 focus:border-transparent w-28 text-sm bg-white dark:bg-gray-700 text-gray-900 dark:text-white"
+                                       placeholder="Y viewport">
+                                <input :value="step.value?.random_radius ?? 0"
+                                       @input="step.value = { ...(step.value || {}), random_radius: Number($event.target.value) }"
+                                       type="number"
+                                       min="0"
+                                       step="1"
+                                       class="border dark:border-gray-600 px-2 py-1.5 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-400 focus:border-transparent w-28 text-sm bg-white dark:bg-gray-700 text-gray-900 dark:text-white"
+                                       placeholder="随机半径">
+                                <div class="w-full text-xs text-gray-500 dark:text-gray-400">
+                                    Use viewport CSS coordinates, not screen coordinates.
+                                </div>
+                            </div>
                             <input v-else-if="step.action === 'KEY_PRESS'" v-model="step.target" placeholder="例如: Enter"
                                    class="border dark:border-gray-600 px-2 py-1.5 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-400 focus:border-transparent w-full mt-1 text-sm bg-white dark:bg-gray-700 text-gray-900 dark:text-white">
                             <div v-else-if="step.action === 'WAIT'" class="flex items-center gap-2 mt-1">
@@ -131,7 +160,7 @@ window.WorkflowPanel = {
                         <div class="pt-5">
                             <label class="flex items-center text-xs cursor-pointer whitespace-nowrap text-gray-600 dark:text-gray-300 hover:text-gray-900 dark:hover:text-white transition-colors">
                                 <input type="checkbox" v-model="step.optional" class="mr-1.5 rounded">
-                                <span>可选</span>
+                                <span>是否必要</span>
                             </label>
                         </div>
 

@@ -101,7 +101,7 @@ class TabSession:
             self.request_count += 1
             return True
     
-    def release(self, clear_page: bool = False):
+    def release(self, clear_page: bool = False, check_triggers: bool = True):
         with self._lock:
             self.status = TabStatus.IDLE
             self.current_task_id = None
@@ -117,7 +117,8 @@ class TabSession:
         # 🆕 触发命令检查（在锁外执行，避免阻塞）
         try:
             from app.services.command_engine import command_engine
-            command_engine.check_triggers(self)
+            if check_triggers:
+                command_engine.check_triggers(self)
         except Exception as e:
             logger.debug(f"命令触发检查异常: {e}")
     
@@ -387,7 +388,7 @@ class TabPoolManager:
                     new_count += 1
                     
                     display_url = url[:60] + "..." if len(url) > 60 else url
-                    logger.info(f"🆕 发现新标签页: {session.id} -> {display_url}")
+                    logger.debug(f"🆕 发现新标签页: {session.id} -> {display_url}")
                     
                 except Exception as e:
                     logger.debug(f"处理标签页出错: {e}")
@@ -582,12 +583,12 @@ class TabPoolManager:
     async def acquire_async(self, task_id: str, timeout: float = None) -> Optional[TabSession]:
         return await asyncio.to_thread(self.acquire, task_id, timeout)
     
-    def release(self, tab_id: str, clear_page: bool = False):
+    def release(self, tab_id: str, clear_page: bool = False, check_triggers: bool = True):
         """释放标签页"""
         with self._condition:
             session = self._tabs.get(tab_id)
             if session:
-                session.release(clear_page=clear_page)
+                session.release(clear_page=clear_page, check_triggers=check_triggers)
                 self._condition.notify_all()
                 logger.debug(f"[{tab_id}] 已释放")
     
@@ -750,7 +751,7 @@ class TabPoolManager:
             old_preset = session.preset_name
             session.preset_name = preset_name if preset_name else None
             
-            logger.info(
+            logger.debug(
                 f"[{session.id}] 预设切换: "
                 f"'{old_preset or '主预设'}' → '{preset_name or '主预设'}'"
             )

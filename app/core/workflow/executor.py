@@ -273,7 +273,7 @@ class WorkflowExecutor:
     # ================= 步骤执行 =================
     
     def execute_step(self, action: str, selector: str,
-                     target_key: str, value: str = None,
+                     target_key: str, value: Any = None,
                      optional: bool = False,
                      context: Dict = None) -> Generator[str, None, None]:
         """执行单个步骤"""
@@ -320,6 +320,13 @@ class WorkflowExecutor:
                     )
                 else:
                     self._execute_click(selector, target_key, optional)
+
+            elif action == "COORD_CLICK":
+                if self.stealth_mode and not getattr(self, '_page_warmed_up', False):
+                    self._warmup_page_for_stealth()
+                    self._page_warmed_up = True
+
+                self._execute_coord_click(value, optional)
             
             elif action == "FILL_INPUT":
                 
@@ -453,6 +460,156 @@ class WorkflowExecutor:
         
         elif not optional:
             raise ElementNotFoundError(f"点击目标未找到: {selector}")
+
+    def _execute_coord_click(self, value: Any, optional: bool):
+        """执行坐标点击动作。"""
+        if self._check_cancelled():
+            return
+
+        if not isinstance(value, dict):
+            if optional:
+                logger.warning("[COORD_CLICK] 缺少坐标配置，已跳过")
+                return
+            raise WorkflowError("coord_click_missing_value")
+
+        try:
+            x = int(value.get("x"))
+            y = int(value.get("y"))
+        except Exception:
+            if optional:
+                logger.warning(f"[COORD_CLICK] 坐标无效，已跳过: {value}")
+                return
+            raise WorkflowError("coord_click_invalid_position")
+
+        radius = max(0, int(value.get("random_radius", 0) or 0))
+        click_x = x + random.randint(-radius, radius) if radius > 0 else x
+        click_y = y + random.randint(-radius, radius) if radius > 0 else y
+
+        try:
+            self._human_cdp_click_at(click_x, click_y)
+            self._smart_delay(
+                BrowserConstants.ACTION_DELAY_MIN,
+                BrowserConstants.ACTION_DELAY_MAX
+            )
+        except Exception:
+            if optional:
+                logger.warning(f"[COORD_CLICK] 点击失败，已跳过: ({click_x}, {click_y})")
+                return
+            raise
+
+    def _ensure_mouse_origin(self) -> tuple:
+        """
+        确保存在一个页面内鼠标起点。
+
+        只使用 CDP mouseMoved 建立当前位置，不走 tab.actions / ele.click。
+        """
+        if self._mouse_pos is not None:
+            return self._mouse_pos
+
+        from app.utils.human_mouse import _dispatch_mouse_move
+
+        vw, vh = self._get_viewport_size()
+        origin_x = random.randint(max(40, int(vw * 0.18)), max(60, int(vw * 0.42)))
+        origin_y = random.randint(max(40, int(vh * 0.16)), max(60, int(vh * 0.45)))
+
+        _dispatch_mouse_move(self.tab, origin_x, origin_y)
+        self._mouse_pos = (origin_x, origin_y)
+        time.sleep(random.uniform(0.03, 0.10))
+        return self._mouse_pos
+
+    def _flash_click_marker(self, x: int, y: int):
+        """在页面上短暂标记实际点击坐标，便于排查坐标系问题。"""
+        try:
+            self.tab.run_js(
+                """
+                const x = arguments[0];
+                const y = arguments[1];
+                const id = '__coord_click_debug_marker__';
+                document.getElementById(id)?.remove();
+                const dot = document.createElement('div');
+                dot.id = id;
+                Object.assign(dot.style, {
+                    position: 'fixed',
+                    left: `${x - 6}px`,
+                    top: `${y - 6}px`,
+                    width: '12px',
+                    height: '12px',
+                    borderRadius: '9999px',
+                    background: 'rgba(255, 59, 48, 0.95)',
+                    border: '2px solid #fff',
+                    boxShadow: '0 0 0 2px rgba(255, 59, 48, 0.35)',
+                    zIndex: '2147483647',
+                    pointerEvents: 'none'
+                });
+                document.body.appendChild(dot);
+                setTimeout(() => dot.remove(), 900);
+                """,
+                x,
+                y
+            )
+        except Exception:
+            pass
+
+    def _human_cdp_click_at(self, x: int, y: int):
+        """
+        使用 human_mouse 轨迹移动，并以 CDP 精确点击结束。
+
+        链路固定为：
+        页面内某处起点 -> smooth_move_mouse -> 短暂停顿/微漂移 -> cdp_precise_click
+        """
+        if self._check_cancelled():
+            return
+
+        self._flash_click_marker(x, y)
+        logger.debug(f"[COORD_CLICK] viewport click at ({x}, {y})")
+
+        start_pos = self._ensure_mouse_origin()
+
+        self._mouse_pos = smooth_move_mouse(
+            tab=self.tab,
+            from_pos=start_pos,
+            to_pos=(x, y),
+            check_cancelled=self._check_cancelled
+        )
+
+        if self._check_cancelled():
+            return
+
+        if random.random() < 0.65:
+            self._mouse_pos = idle_drift(
+                tab=self.tab,
+                duration=random.uniform(0.04, 0.12),
+                center_pos=self._mouse_pos,
+                check_cancelled=self._check_cancelled,
+                drift_radius=random.uniform(1.2, 2.8),
+                freq_hz=random.uniform(6.0, 10.0)
+            )
+        else:
+            time.sleep(random.uniform(0.04, 0.10))
+
+        if self._check_cancelled():
+            return
+
+        success = cdp_precise_click(
+            tab=self.tab,
+            x=x,
+            y=y,
+            check_cancelled=self._check_cancelled
+        )
+        if not success:
+            logger.warning(f"[CDP_CLICK] 首次坐标点击失败，重试一次: ({x}, {y})")
+            time.sleep(random.uniform(0.08, 0.18))
+            success = cdp_precise_click(
+                tab=self.tab,
+                x=x,
+                y=y,
+                check_cancelled=self._check_cancelled
+            )
+
+        if not success:
+            raise WorkflowError("coord_click_failed")
+
+        self._mouse_pos = (x, y)
     
     def _stealth_click_element(self, ele):
         """

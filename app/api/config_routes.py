@@ -362,9 +362,11 @@ async def inject_workflow_editor(request: Request):
     
     try:
         target_domain = None
+        preset_name = None
         try:
             body = await request.json()
             target_domain = body.get("target_domain")
+            preset_name = body.get("preset_name")
         except Exception:
             pass
         
@@ -409,11 +411,20 @@ async def inject_workflow_editor(request: Request):
         config_domain = target_domain or actual_domain
         site_config = None
         try:
-            site_config = config_engine.get_site_config(config_domain, tab.html)
+            site_config = config_engine.get_site_config(
+                config_domain,
+                tab.html,
+                preset_name=preset_name
+            )
         except Exception as e:
             logger.debug(f"获取站点配置失败: {e}")
         
-        result = workflow_editor_injector.inject(tab, site_config, target_domain=config_domain)
+        result = workflow_editor_injector.inject(
+            tab,
+            site_config,
+            target_domain=config_domain,
+            preset_name=preset_name
+        )
         
         if result["success"]:
             return JSONResponse(content=result)
@@ -438,15 +449,38 @@ async def update_site_workflow(
     try:
         data = await request.json()
         new_workflow = data.get("workflow")
+        new_selectors = data.get("selectors")
         preset_name = data.get("preset_name")
         
         if new_workflow is None:
             raise HTTPException(status_code=400, detail="缺少 workflow 字段")
+
+        if not isinstance(new_workflow, list):
+            raise HTTPException(status_code=400, detail="workflow 必须是数组")
+
+        if new_selectors is not None and (
+            not isinstance(new_selectors, dict) or isinstance(new_selectors, list)
+        ):
+            raise HTTPException(status_code=400, detail="selectors 必须是对象")
         
         if domain not in config_engine.sites:
             raise HTTPException(status_code=404, detail=f"站点不存在: {domain}")
-        
-        success = config_engine.set_preset_workflow(domain, new_workflow, preset_name=preset_name)
+
+        site = config_engine.sites[domain]
+        presets = site.get("presets", {})
+        if preset_name and preset_name not in presets:
+            raise HTTPException(status_code=404, detail=f"预设不存在: {preset_name}")
+
+        config_engine.refresh_if_changed()
+        preset_data = config_engine._get_site_data(domain, preset_name)
+        if preset_data is None:
+            raise HTTPException(status_code=404, detail="站点或预设不存在")
+
+        preset_data["workflow"] = new_workflow
+        if new_selectors is not None:
+            preset_data["selectors"] = new_selectors
+
+        success = config_engine.save_config()
         
         if not success:
             raise HTTPException(status_code=500, detail="保存配置文件失败")

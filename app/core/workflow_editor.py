@@ -39,7 +39,13 @@ class WorkflowEditorInjector:
         return cls._script_cache
     
     @classmethod
-    def inject(cls, tab, site_config: dict = None, target_domain: str = None) -> dict:
+    def inject(
+        cls,
+        tab,
+        site_config: dict = None,
+        target_domain: str = None,
+        preset_name: str = None
+    ) -> dict:
         """
         向标签页注入编辑器
         
@@ -81,6 +87,9 @@ class WorkflowEditorInjector:
                 
                 if target_domain:
                     update_parts.append(f"window.__WORKFLOW_EDITOR_TARGET_DOMAIN__ = '{target_domain}';")
+
+                if preset_name:
+                    update_parts.append(f"window.__WORKFLOW_EDITOR_PRESET_NAME__ = '{preset_name}';")
                 
                 if site_config:
                     import json
@@ -112,6 +121,9 @@ class WorkflowEditorInjector:
             # 2. 注入目标域名
             if target_domain:
                 injection_parts.append(f"window.__WORKFLOW_EDITOR_TARGET_DOMAIN__ = '{target_domain}';")
+
+            if preset_name:
+                injection_parts.append(f"window.__WORKFLOW_EDITOR_PRESET_NAME__ = '{preset_name}';")
             
             # 3. 注入站点配置
             if site_config:

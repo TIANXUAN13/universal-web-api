@@ -477,6 +477,8 @@ const app = createApp({
             // UI 状态
             toasts: [],
             toastCounter: 0,
+            hasLoadedSettings: false,
+            hasLoadedExtractors: false,
             isSaving: false,
             isLoading: false,
             showJsonPreview: false,
@@ -609,6 +611,12 @@ const app = createApp({
         }
     },
 
+    watch: {
+        activeTab(tab) {
+            this.ensureTabDataLoaded(tab)
+        }
+    },
+
     mounted() {
         // 读取夜间模式设置
         const savedDarkMode = localStorage.getItem('darkMode')
@@ -622,33 +630,51 @@ const app = createApp({
         // 初始化折叠状态
         this.initCollapsedStates()
 
-        this.loadConfig(true)
-        this.refreshStatus()
-        this.checkAuth()
+        this.initializeDashboard()
 
         // 启动日志轮询（每 1 秒）
-        this.logPollingTimer = setInterval(() => {
-            this.pollLogs();
-        }, 1000);
 
         // 加载系统设置
-        this.loadEnvConfig()
-        this.loadBrowserConstants()
 
         // 加载元素定义
-        this.loadSelectorDefinitions()
 
         // 加载提取器列表
-        this.loadExtractors()
     },
 
     beforeUnmount() {
-        if (this.logPollingTimer) {
-            clearInterval(this.logPollingTimer);
-        }
+        this.stopLogPolling()
     },
 
     methods: {
+        async initializeDashboard() {
+            await Promise.all([
+                this.loadConfig(true),
+                this.loadHealthStatus({ silent: true })
+            ])
+
+            this.startLogPolling()
+            this.ensureTabDataLoaded(this.activeTab)
+        },
+
+        startLogPolling() {
+            if (this.logPollingTimer) {
+                return
+            }
+
+            this.pollLogs()
+            this.logPollingTimer = setInterval(() => {
+                this.pollLogs()
+            }, 1000)
+        },
+
+        stopLogPolling() {
+            if (!this.logPollingTimer) {
+                return
+            }
+
+            clearInterval(this.logPollingTimer)
+            this.logPollingTimer = null
+        },
         // ========== 初始化 ==========
 
         initCollapsedStates() {
@@ -712,7 +738,7 @@ const app = createApp({
                     if (response.status === 401) {
                         this.notify('认证失败，请检查 Token', 'error')
                         this.showTokenDialog = true
-                        throw new Error('未授权')
+                        throw new Error('UNAUTHORIZED')
                     }
 
                     const errorData = await response.json().catch(() => ({}))
@@ -721,7 +747,7 @@ const app = createApp({
 
                 return await response.json()
             } catch (error) {
-                if (error.message !== '未授权') {
+                if (error.message !== 'UNAUTHORIZED') {
                     console.error('API 请求错误:', error)
                 }
                 throw error
@@ -746,9 +772,11 @@ const app = createApp({
                 if (!silent) {
                     this.notify('配置已刷新 (' + Object.keys(this.sites).length + ' 个站点)', 'success')
                 }
+                return true
             } catch (error) {
                 this.notify('加载配置失败: ' + error.message, 'error')
                 this.sites = {}
+                return false
             } finally {
                 this.isLoading = false
             }
@@ -774,31 +802,40 @@ const app = createApp({
         },
 
         async refreshStatus() {
-            try {
-                // 1. 先重新加载所有配置 (修复刷新不出来新站点的问题)
-                await this.loadConfig(true);
+            const [configOk, healthOk] = await Promise.all([
+                this.loadConfig(true),
+                this.loadHealthStatus()
+            ])
 
-                // 2. 再检查健康状态
+            if (configOk || healthOk) {
+                this.notify('状态已刷新', 'success')
+            } else {
+                this.notify('刷新失败', 'error')
+            }
+        },
+
+        async loadHealthStatus({ silent = false } = {}) {
+            try {
                 const health = await this.apiRequest('/health')
                 this.browserStatus = health.browser || {}
                 this.authEnabled = health.config?.auth_enabled || false
-
-                this.notify('状态已刷新', 'success')
+                return true
             } catch (error) {
+                if (error.message === 'UNAUTHORIZED') {
+                    this.authEnabled = true
+                    return true
+                }
+
                 console.error('状态检查失败:', error)
-                this.notify('刷新失败: ' + error.message, 'error')
+                if (!silent) {
+                    this.notify('状态检查失败: ' + error.message, 'error')
+                }
+                return false
             }
         },
 
         async checkAuth() {
-            try {
-                const health = await this.apiRequest('/health')
-                this.authEnabled = health.config?.auth_enabled || false
-            } catch (error) {
-                if (error.message === '未授权') {
-                    this.authEnabled = true
-                }
-            }
+            return this.loadHealthStatus({ silent: true })
         },
 
         async testSelector(key, selector) {
@@ -1646,6 +1683,23 @@ const app = createApp({
             this.activeTab = tab;
         },
 
+        async ensureTabDataLoaded(tab) {
+            if (tab === 'settings' && !this.hasLoadedSettings) {
+                this.hasLoadedSettings = true;
+                await Promise.all([
+                    this.loadEnvConfig(),
+                    this.loadBrowserConstants(),
+                    this.loadSelectorDefinitions()
+                ]);
+                return;
+            }
+
+            if (tab === 'extractors' && !this.hasLoadedExtractors) {
+                this.hasLoadedExtractors = true;
+                await this.loadExtractors();
+            }
+        },
+
         // ========== 预设辅助方法 ==========
 
         getActivePresetName() {
@@ -1727,12 +1781,13 @@ const app = createApp({
             }
 
             const selectors = presetConfig.selectors || {}
-            if (Object.keys(selectors).length === 0) {
+            const workflow = presetConfig.workflow || []
+            const hasSelectorActions = workflow.some(step => ['FILL_INPUT', 'CLICK', 'STREAM_WAIT'].includes(step.action))
+            if (hasSelectorActions && Object.keys(selectors).length === 0) {
                 this.notify('至少需要一个选择器', 'warning')
                 return false
             }
 
-            const workflow = presetConfig.workflow || []
             for (let i = 0; i < workflow.length; i++) {
                 const step = workflow[i]
 
@@ -1744,6 +1799,15 @@ const app = createApp({
                 if (['FILL_INPUT', 'CLICK', 'STREAM_WAIT'].includes(step.action)) {
                     if (!step.target) {
                         this.notify('步骤 ' + (i + 1) + ': 请选择目标选择器', 'error')
+                        return false
+                    }
+                }
+
+                if (step.action === 'COORD_CLICK') {
+                    const x = Number(step.value?.x)
+                    const y = Number(step.value?.y)
+                    if (!Number.isFinite(x) || !Number.isFinite(y)) {
+                        this.notify('步骤 ' + (i + 1) + ': 请输入有效的 X/Y 坐标', 'error')
                         return false
                     }
                 }
@@ -1909,6 +1973,13 @@ const app = createApp({
             if (['FILL_INPUT', 'CLICK', 'STREAM_WAIT'].includes(step.action)) {
                 step.value = null
                 if (!step.target) step.target = ''
+            } else if (step.action === 'COORD_CLICK') {
+                step.target = ''
+                step.value = {
+                    x: Number(step.value?.x ?? 0),
+                    y: Number(step.value?.y ?? 0),
+                    random_radius: Number(step.value?.random_radius ?? 10)
+                }
             } else if (step.action === 'KEY_PRESS') {
                 step.value = null
                 if (!step.target) step.target = 'Enter'
@@ -1968,13 +2039,97 @@ const app = createApp({
 
         // ========== 工具功能 ==========
 
-        copyJson() {
-            const text = JSON.stringify(this.getActivePresetConfig() || this.sites[this.currentDomain], null, 2)
+        copyJson(textOverride) {
+            const text = typeof textOverride === 'string'
+                ? textOverride
+                : JSON.stringify(this.getJsonPreviewData(), null, 2)
             navigator.clipboard.writeText(text).then(() => {
                 this.notify('已复制到剪贴板', 'success')
             }).catch(() => {
                 this.notify('复制失败', 'error')
             })
+        },
+
+        getJsonPreviewData() {
+            const config = this.getActivePresetConfig() || {}
+            return JSON.parse(JSON.stringify(config))
+        },
+
+        async saveJsonPreview(rawText) {
+            if (!this.currentDomain) {
+                this.notify('请先选择站点', 'warning')
+                return
+            }
+
+            let parsed
+            try {
+                parsed = JSON.parse(rawText)
+            } catch (error) {
+                this.notify('JSON 解析失败: ' + error.message, 'error')
+                return
+            }
+
+            if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+                this.notify('JSON 顶层必须是对象', 'error')
+                return
+            }
+
+            if (parsed.selectors !== undefined && (typeof parsed.selectors !== 'object' || Array.isArray(parsed.selectors))) {
+                this.notify('selectors 必须是对象', 'error')
+                return
+            }
+
+            if (parsed.workflow !== undefined && !Array.isArray(parsed.workflow)) {
+                this.notify('workflow 必须是数组', 'error')
+                return
+            }
+
+            if (parsed.presets && typeof parsed.presets === 'object' && !Array.isArray(parsed.presets)) {
+                const normalized = this.normalizeConfig({ [this.currentDomain]: parsed })
+                if (normalized[this.currentDomain]) {
+                    this.sites[this.currentDomain] = normalized[this.currentDomain]
+                }
+
+                try {
+                    await this.apiRequest('/api/config', {
+                        method: 'POST',
+                        body: JSON.stringify({ config: this.sites })
+                    })
+                    this.showJsonPreview = false
+                    this.notify('站点 JSON 已保存', 'success')
+                } catch (error) {
+                    this.notify('保存失败: ' + error.message, 'error')
+                }
+                return
+            }
+
+            const site = JSON.parse(JSON.stringify(this.sites[this.currentDomain] || {}))
+            const presets = site.presets || { '主预设': {} }
+            const presetName = this.getActivePresetName()
+            const currentPreset = presets[presetName] || presets['主预设'] || {}
+            const { domain, preset_name, timestamp, ...presetPatch } = parsed
+
+            presets[presetName] = {
+                ...currentPreset,
+                ...presetPatch,
+                selectors: presetPatch.selectors !== undefined ? presetPatch.selectors : (currentPreset.selectors || {}),
+                workflow: presetPatch.workflow !== undefined ? presetPatch.workflow : (currentPreset.workflow || []),
+                stealth: presetPatch.stealth !== undefined ? !!presetPatch.stealth : !!currentPreset.stealth
+            }
+
+            site.presets = presets
+            this.sites[this.currentDomain] = site
+
+            try {
+                await this.apiRequest('/api/config', {
+                    method: 'POST',
+                    body: JSON.stringify({ config: this.sites })
+                })
+                this.showJsonPreview = false
+                this.notify('JSON 修改已保存', 'success')
+            } catch (error) {
+                this.notify('保存失败: ' + error.message, 'error')
+            }
         },
 
         saveToken() {
@@ -2040,3 +2195,8 @@ app.mixin({
 
 // ========== 启动应用 ==========
 app.mount('#app');
+document.body.classList.add('app-mounted');
+const appShell = document.getElementById('app-shell');
+if (appShell) {
+    appShell.style.display = 'none';
+}
