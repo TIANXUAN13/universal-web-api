@@ -607,10 +607,36 @@ class CommandEngine:
             prompt = str(action.get("prompt", ""))
 
             if preset_name:
-                ok = browser.tab_pool.set_tab_preset(session.persistent_index, preset_name)
-                if not ok:
-                    logger.warning(f"[CMD] 切换到执行预设失败: {preset_name}")
-                    return
+                effective_preset = preset_name
+                logger.debug(
+                    f"[CMD] 寮€濮嬫墽琛屽伐浣滄祦: tab=#{session.persistent_index}, preset={effective_preset}"
+                )
+
+                messages = [{"role": "user", "content": prompt}]
+                chunks = list(
+                    browser._execute_workflow_non_stream(
+                        session,
+                        messages,
+                        preset_name=preset_name,
+                    )
+                )
+
+                for chunk in chunks:
+                    payload = chunk[6:].strip() if chunk.startswith("data: ") else chunk
+                    if not payload:
+                        continue
+                    try:
+                        data = json.loads(payload)
+                    except Exception:
+                        continue
+                    if isinstance(data, dict) and data.get("error"):
+                        logger.warning(f"[CMD] 宸ヤ綔娴佽繑鍥為敊璇? {data['error']}")
+                        return
+
+                logger.debug(
+                    f"[CMD] 宸ヤ綔娴佹墽琛屽畬鎴? tab=#{session.persistent_index}, preset={effective_preset}"
+                )
+                return
 
             effective_preset = session.preset_name or "主预设"
             logger.debug(

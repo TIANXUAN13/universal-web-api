@@ -29,8 +29,8 @@
       "script": "",
       "script_lang": "javascript",
       "id": "cmd_58625812",
-      "last_triggered": 1772537512.6633134,
-      "trigger_count": 7
+      "last_triggered": 1772555582.5894597,
+      "trigger_count": 12
     },
     {
       "name": "自动过CF盾",
@@ -38,7 +38,7 @@
       "mode": "simple",
       "trigger": {
         "type": "page_check",
-        "value": "Cloudflare",
+        "value": "Security Verification",
         "scope": "domain",
         "domain": "arena.ai",
         "tab_index": null,
@@ -83,8 +83,8 @@
       "script": "",
       "script_lang": "javascript",
       "id": "cmd_aab3f583",
-      "last_triggered": 1772537715.0744512,
-      "trigger_count": 11
+      "last_triggered": 1772555589.5452244,
+      "trigger_count": 18
     },
     {
       "name": "新命令",

@@ -298,9 +298,12 @@ class WorkflowExecutor:
             elif action == "KEY_PRESS":
                 key = target_key or value
                 # 包含 Enter 的按键（Enter、Ctrl+Enter 等）可能触发提交
-                if key and "Enter" in key and self._network_monitor is not None:
+                if self._combo_contains_submit_key(key) and self._network_monitor is not None:
                     self._network_monitor.pre_start()
-                self._execute_keypress(key)
+                self._execute_keypress_combo(key)
+
+            elif action == "JS_EXEC":
+                self._execute_javascript(value)
             
             elif action == "CLICK":
                 # ===== 隐身模式：首次交互前执行人类行为预热 =====
@@ -418,6 +421,108 @@ class WorkflowExecutor:
         
         self._smart_delay(0.1, 0.2)
     
+    def _execute_keypress_combo(self, key: Any):
+        """执行按键动作，支持组合键。"""
+        if self._check_cancelled():
+            return
+
+        keys = self._parse_key_combo(key)
+        if not keys:
+            return
+
+        if self.stealth_mode:
+            for item in keys:
+                self.tab.actions.key_down(item)
+                time.sleep(random.uniform(0.03, 0.09))
+            time.sleep(random.uniform(0.05, 0.13))
+            for item in reversed(keys):
+                self.tab.actions.key_up(item)
+                time.sleep(random.uniform(0.02, 0.08))
+        else:
+            for item in keys:
+                self.tab.actions.key_down(item)
+            for item in reversed(keys):
+                self.tab.actions.key_up(item)
+
+        self._smart_delay(0.1, 0.2)
+
+    def _execute_javascript(self, code: Any):
+        """在当前页面执行 JavaScript。"""
+        if self._check_cancelled():
+            return
+
+        script = str(code or "").strip()
+        if not script:
+            raise WorkflowError("js_exec_empty")
+
+        result = self.tab.run_js(script)
+        logger.debug(f"[JS_EXEC] 执行完成: {str(result)[:120]}")
+
+    def _combo_contains_submit_key(self, key: Any) -> bool:
+        return any(item == "Enter" for item in self._parse_key_combo(key))
+
+    def _parse_key_combo(self, key: Any) -> list[str]:
+        raw = str(key or "").strip()
+        if not raw:
+            return []
+
+        parts = [part.strip() for part in raw.split("+") if part.strip()]
+        normalized_parts = [self._normalize_key_name(part) for part in parts]
+        return [part for part in normalized_parts if part]
+
+    def _normalize_key_name(self, key: str) -> str:
+        normalized = str(key or "").strip()
+        if not normalized:
+            return ""
+
+        key_map = {
+            "ctrl": "Ctrl",
+            "control": "Ctrl",
+            "cmd": "Meta",
+            "command": "Meta",
+            "meta": "Meta",
+            "win": "Meta",
+            "windows": "Meta",
+            "shift": "Shift",
+            "alt": "Alt",
+            "option": "Alt",
+            "enter": "Enter",
+            "return": "Enter",
+            "esc": "Escape",
+            "escape": "Escape",
+            "tab": "Tab",
+            "space": "Space",
+            "spacebar": "Space",
+            "backspace": "Backspace",
+            "delete": "Delete",
+            "del": "Delete",
+            "insert": "Insert",
+            "home": "Home",
+            "end": "End",
+            "pageup": "PageUp",
+            "pagedown": "PageDown",
+            "up": "ArrowUp",
+            "down": "ArrowDown",
+            "left": "ArrowLeft",
+            "right": "ArrowRight",
+            "arrowup": "ArrowUp",
+            "arrowdown": "ArrowDown",
+            "arrowleft": "ArrowLeft",
+            "arrowright": "ArrowRight",
+        }
+
+        lower_name = normalized.lower()
+        if lower_name in key_map:
+            return key_map[lower_name]
+
+        if len(normalized) == 1:
+            return normalized.upper()
+
+        if lower_name.startswith("f") and lower_name[1:].isdigit():
+            return lower_name.upper()
+
+        return normalized
+
     def _execute_click(self, selector: str, target_key: str, optional: bool):
         """执行点击操作（v5.7 隐身模式人类化点击）"""
         if self._check_cancelled():

@@ -519,7 +519,8 @@ class BrowserCore:
     def _execute_workflow_stream(
         self, 
         session: TabSession,
-        messages: List[Dict]
+        messages: List[Dict],
+        preset_name: Optional[str] = None
     ) -> Generator[str, None, None]:
         """流式工作流执行（v2.0）"""
     
@@ -614,8 +615,8 @@ class BrowserCore:
             return
         
         config_engine = self._get_config_engine()
-        preset_name = session.preset_name  # 🆕 获取标签页绑定的预设
-        site_config = config_engine.get_site_config(domain, tab.html, preset_name=preset_name)
+        effective_preset_name = preset_name if preset_name is not None else session.preset_name
+        site_config = config_engine.get_site_config(domain, tab.html, preset_name=effective_preset_name)
         if not site_config:
             yield self.formatter.pack_error(
                 "配置加载失败",
@@ -681,8 +682,8 @@ class BrowserCore:
             "images": user_images
         }
         
-        extractor = config_engine.get_site_extractor(domain, preset_name=preset_name)
-        logger.debug(f"[{session.id}] 使用提取器: {extractor.get_id()} [预设: {preset_name or '主预设'}]")
+        extractor = config_engine.get_site_extractor(domain, preset_name=effective_preset_name)
+        logger.debug(f"[{session.id}] 使用提取器: {extractor.get_id()} [预设: {effective_preset_name or '主预设'}]")
         
         # 创建执行器
         executor = WorkflowExecutor(
@@ -711,7 +712,7 @@ class BrowserCore:
                 
                 selector = selectors.get(target_key, '')
                 
-                if not selector and action not in ("WAIT", "KEY_PRESS", "COORD_CLICK"):
+                if not selector and action not in ("WAIT", "KEY_PRESS", "COORD_CLICK", "JS_EXEC"):
                     if optional:
                         continue
                     else:
@@ -983,13 +984,14 @@ class BrowserCore:
     def _execute_workflow_non_stream(
         self, 
         session: TabSession,
-        messages: List[Dict]
+        messages: List[Dict],
+        preset_name: Optional[str] = None
     ) -> Generator[str, None, None]:
         """非流式工作流执行"""
         collected_content = []
         error_data = None
         
-        for chunk in self._execute_workflow_stream(session, messages):
+        for chunk in self._execute_workflow_stream(session, messages, preset_name=preset_name):
             if chunk.startswith("data: [DONE]"):
                 continue
             

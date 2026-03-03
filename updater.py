@@ -46,6 +46,7 @@ DEFAULT_PRESERVE = [
 ]
 
 COMMANDS_CONFIG_PATH = Path("config") / "commands.json"
+COMMAND_RUNTIME_FIELDS = ("last_triggered", "trigger_count")
 
 class Colors:
     CYAN = '\033[96m'
@@ -527,49 +528,76 @@ def load_commands_config(path: Path) -> list:
         log_warning(f"加载命令配置失败，按空列表处理: {path} ({e})")
         return []
 
-def merge_commands(existing: list, incoming: list) -> tuple[list, int]:
-    """保留现有命令，只追加不存在的命令"""
-    merged = list(existing or [])
-    appended = 0
+def _same_command(left: dict, right: dict) -> bool:
+    """判断两条命令是否代表同一个内置命令。"""
+    left_id = str(left.get("id", "")).strip()
+    right_id = str(right.get("id", "")).strip()
+    if left_id and right_id:
+        return left_id == right_id
 
-    seen_ids = {
-        str(cmd.get("id", "")).strip()
-        for cmd in merged
-        if isinstance(cmd, dict) and str(cmd.get("id", "")).strip()
+    left_name = str(left.get("name", "")).strip()
+    right_name = str(right.get("name", "")).strip()
+    return bool(left_name and right_name and left_name == right_name)
+
+def _merge_command_record(existing: dict, incoming: dict) -> dict:
+    """以发布版命令为准，保留本地运行时统计字段。"""
+    merged = dict(incoming)
+    for field in COMMAND_RUNTIME_FIELDS:
+        if field in existing:
+            merged[field] = existing[field]
+    return merged
+
+def merge_commands(existing: list, incoming: list) -> tuple[list, dict]:
+    """
+    合并命令配置。
+
+    - 发布版内置命令：用新版本覆盖旧版本
+    - 本地自定义命令：若发布版中不存在，则保留
+    """
+    existing_commands = [cmd for cmd in (existing or []) if isinstance(cmd, dict)]
+    incoming_commands = [cmd for cmd in (incoming or []) if isinstance(cmd, dict)]
+
+    merged = []
+    matched_existing = set()
+    updated = 0
+    added = 0
+    preserved = 0
+
+    for incoming_cmd in incoming_commands:
+        match_index = None
+        for index, existing_cmd in enumerate(existing_commands):
+            if index in matched_existing:
+                continue
+            if _same_command(existing_cmd, incoming_cmd):
+                match_index = index
+                break
+
+        if match_index is None:
+            merged.append(dict(incoming_cmd))
+            added += 1
+            continue
+
+        merged.append(_merge_command_record(existing_commands[match_index], incoming_cmd))
+        matched_existing.add(match_index)
+        updated += 1
+
+    for index, existing_cmd in enumerate(existing_commands):
+        if index in matched_existing:
+            continue
+        merged.append(dict(existing_cmd))
+        preserved += 1
+
+    return merged, {
+        "updated": updated,
+        "added": added,
+        "preserved": preserved,
     }
-    seen_names = {
-        str(cmd.get("name", "")).strip()
-        for cmd in merged
-        if isinstance(cmd, dict) and str(cmd.get("name", "")).strip()
-    }
-
-    for cmd in incoming or []:
-        if not isinstance(cmd, dict):
-            continue
-
-        command_id = str(cmd.get("id", "")).strip()
-        command_name = str(cmd.get("name", "")).strip()
-
-        if command_id and command_id in seen_ids:
-            continue
-        if command_name and command_name in seen_names:
-            continue
-
-        merged.append(cmd)
-        appended += 1
-
-        if command_id:
-            seen_ids.add(command_id)
-        if command_name:
-            seen_names.add(command_name)
-
-    return merged, appended
 
 def merge_command_file(src_path: Path, dst_path: Path):
-    """合并命令配置文件，避免更新时覆盖用户自定义命令"""
+    """合并命令配置文件，更新内置命令并保留用户自定义命令"""
     incoming = load_commands_config(src_path)
     existing = load_commands_config(dst_path)
-    merged, appended = merge_commands(existing, incoming)
+    merged, stats = merge_commands(existing, incoming)
     had_existing = dst_path.exists()
 
     dst_path.parent.mkdir(parents=True, exist_ok=True)
@@ -577,7 +605,12 @@ def merge_command_file(src_path: Path, dst_path: Path):
         json.dump({"commands": merged}, f, indent=2, ensure_ascii=False)
 
     if had_existing:
-        log_info(f"命令配置已合并: 保留 {len(existing)} 条，追加 {appended} 条")
+        log_info(
+            "命令配置已合并: "
+            f"更新 {stats['updated']} 条内置命令，"
+            f"新增 {stats['added']} 条发布命令，"
+            f"保留 {stats['preserved']} 条本地命令"
+        )
     else:
         log_info(f"命令配置已写入: {len(merged)} 条")
 

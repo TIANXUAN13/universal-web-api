@@ -871,6 +871,12 @@
             "value": null
           },
           {
+            "action": "WAIT",
+            "target": "",
+            "optional": false,
+            "value": 0.5
+          },
+          {
             "action": "KEY_PRESS",
             "target": "Enter",
             "optional": false,

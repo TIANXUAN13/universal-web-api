@@ -1823,6 +1823,14 @@ const app = createApp({
                 }
             }
 
+            for (let i = 0; i < workflow.length; i++) {
+                const step = workflow[i]
+                if (step.action === 'JS_EXEC' && !String(step.value || '').trim()) {
+                    this.notify('步骤 ' + (i + 1) + ': 请输入 JavaScript 代码', 'error')
+                    return false
+                }
+            }
+
             return true
         },
 
@@ -1983,6 +1991,9 @@ const app = createApp({
             } else if (step.action === 'KEY_PRESS') {
                 step.value = null
                 if (!step.target) step.target = 'Enter'
+            } else if (step.action === 'JS_EXEC') {
+                step.target = ''
+                if (!String(step.value || '').trim()) step.value = 'return document.title;'
             } else if (step.action === 'WAIT') {
                 step.target = ''
                 if (!step.value) step.value = '1.0'
