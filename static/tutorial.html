@@ -741,6 +741,7 @@
                 <li>点击「＋ 新建预设」，输入名称后创建</li>
                 <li>新预设会克隆当前选中预设的所有配置</li>
                 <li>然后可以独立修改新预设的选择器、工作流、提取器等配置</li>
+                <li>如需让该预设成为默认，点击「⭐ 设为默认」</li>
             </ol>
 
             <p><strong>2. 为标签页分配预设</strong></p>
@@ -760,12 +761,13 @@ curl http://127.0.0.1:8199/tab/1/v1/chat/completions
 curl http://127.0.0.1:8199/tab/2/v1/chat/completions</code></pre>
 
             <div class="info-box">
-                <p><strong>💡 提示：</strong>每个预设包含独立的选择器、工作流、流式配置、图片提取、文件粘贴等全套配置。修改一个预设不会影响其他预设。</p>
+                <p><strong>💡 提示：</strong>每个预设包含独立的选择器、工作流、流式配置、图片提取、文件粘贴等全套配置。修改一个预设不会影响其他预设。未手动指定时会自动使用站点默认预设（<code>default_preset</code>）。</p>
             </div>
 
             <h3>预设配置结构</h3>
-            <pre><code>{
+<pre><code>{
   "gemini.google.com": {
+    "default_preset": "快速识图",
     "presets": {
       "主预设": {
         "selectors": { ... },
@@ -1087,8 +1089,8 @@ curl http://127.0.0.1:8199/tab/2/v1/chat/completions</code></pre>
                 <tr><th>类型</th><th>说明</th><th>示例</th></tr>
                 <tr>
                     <td><code>request_count</code></td>
-                    <td>对话次数达到阈值</td>
-                    <td>每 10 次对话触发一次</td>
+                    <td>对话次数达到阈值（按作用域聚合计数）</td>
+                    <td>每 10 次对话触发一次（all/domain/tab）</td>
                 </tr>
                 <tr>
                     <td><code>error_count</code></td>
@@ -1122,12 +1124,31 @@ curl http://127.0.0.1:8199/tab/2/v1/chat/completions</code></pre>
                 </tr>
             </table>
 
+            <div class="note">
+                <p><strong>💡 page_check 匹配规则：</strong>默认检查 <code>document.body.innerText</code>，仅在正文不可用时回退到 <code>document.title</code>。英文关键词（如 <code>battle</code>）按单词边界匹配，减少误命中；且为边沿触发，同一关键词持续存在时只触发一次，消失后再次出现才会再次触发。</p>
+            </div>
+
             <h3>作用范围</h3>
             <ul>
                 <li><strong>所有标签页</strong>：命令对所有标签页生效</li>
                 <li><strong>指定域名</strong>：仅对包含特定域名的标签页生效（如 <code>chatgpt.com</code>）</li>
                 <li><strong>指定标签页</strong>：仅对特定编号的标签页生效（如 #1）</li>
             </ul>
+
+            <div class="note">
+                <p><strong>💡 request_count 计数规则：</strong><code>all</code> 统计全部标签页请求总和；<code>domain</code> 统计匹配域名下所有标签页请求总和；<code>tab</code> 仅统计当前标签页。</p>
+            </div>
+
+            <h3>命令优先级与基准点</h3>
+            <ul>
+                <li>每条命令可设置 <code>priority</code>（1-4，默认 2），数字越大优先级越高。</li>
+                <li>系统请求基准优先级由 <code>CMD_REQUEST_PRIORITY_BASELINE</code> 控制（默认 2）。</li>
+                <li>当命令优先级高于基准点时，命令会优先于新请求获取标签页执行。</li>
+                <li>高优先级命令若包含 <code>clear_cookies</code>，会等待同域忙碌标签页结束后再执行，降低对并行会话干扰。</li>
+            </ul>
+            <div class="note">
+                <p><strong>💡 环境变量示例：</strong>在 <code>.env</code> 中设置 <code>CMD_REQUEST_PRIORITY_BASELINE=2</code>（范围 1-4），修改后需重启服务。</p>
+            </div>
 
             <h3>内置动作（与代码一致）</h3>
             <table>
@@ -1371,6 +1392,22 @@ secret: ""  # 如果设置了密钥，需要在命令配置中填写</code></pre
                 </ul>
             </div>
 
+            <h4>示例 6：先清 Cookie 再切模型（避免顺序抢占）</h4>
+            <div class="config-box">
+                <ul style="margin-bottom: 0;">
+                    <li><strong>触发条件</strong>：对话次数 = 10（或你自己的阈值）</li>
+                    <li><strong>作用范围</strong>：指定域名 = <code>arena.ai</code> / <code>chatgpt.com</code></li>
+                    <li><strong>命令优先级</strong>：设为 <code>3</code>（高于默认基准 2）</li>
+                    <li><strong>动作列表（同一条命令内顺序执行）</strong>：
+                        <ol>
+                            <li><code>clear_cookies</code></li>
+                            <li><code>wait</code>（建议 0.5-1 秒）</li>
+                            <li><code>execute_preset</code> 或 <code>execute_workflow</code>（用于切换模型/流程）</li>
+                        </ol>
+                    </li>
+                </ul>
+            </div>
+
             <h3>高级模式：自定义脚本</h3>
             <p>高级模式允许你编写完整的 JavaScript 或 Python 脚本来实现复杂逻辑。</p>
 
@@ -1399,10 +1436,10 @@ if session.error_count > 2:
             </div>
 
             <h3>命令执行时机</h3>
-            <p>命令在<strong>每次对话完成后</strong>自动检查触发条件。如果满足条件，动作会在<strong>后台异步执行</strong>，不会阻塞正在进行的对话。</p>
+            <p>命令会通过两条路径触发检查：<strong>每次对话完成后即时检查</strong> + <strong>空闲标签页周期扫描</strong>。满足条件后动作在后台异步执行；同一轮检查中按优先级从高到低处理。</p>
 
             <div class="note">
-                <p><strong>💡 手动测试：</strong>在命令列表中点击 ▶️ 按钮可以手动触发命令（会在第一个空闲标签页上执行），用于调试配置是否正确。</p>
+                <p><strong>💡 手动测试：</strong>在命令列表中点击 ▶️ 按钮会在<strong>所有空闲且匹配作用域</strong>的标签页上执行，并返回执行/跳过/失败统计，用于快速验证作用域与触发逻辑。</p>
             </div>
         </section>
         <!-- ==================== AI 元素识别 ==================== -->

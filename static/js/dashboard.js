@@ -529,8 +529,8 @@ const app = createApp({
             activeTab: 'config',  // 'config' | 'logs' | 'settings'
 
             // 折叠面板状态
-            selectorCollapsed: false,
-            workflowCollapsed: false,
+            selectorCollapsed: true,
+            workflowCollapsed: true,
 
             // 浏览器状态
             browserStatus: {
@@ -651,12 +651,20 @@ const app = createApp({
     watch: {
         activeTab(tab) {
             this.ensureTabDataLoaded(tab)
+        },
+        darkMode() {
+            this.applyDarkMode()
         }
     },
 
     mounted() {
         // 读取夜间模式设置
-        const savedDarkMode = localStorage.getItem('darkMode')
+        let savedDarkMode = null
+        try {
+            savedDarkMode = localStorage.getItem('darkMode')
+        } catch (e) {
+            savedDarkMode = null
+        }
         if (savedDarkMode !== null) {
             this.darkMode = savedDarkMode === 'true'
         } else {
@@ -715,30 +723,41 @@ const app = createApp({
         // ========== 初始化 ==========
 
         initCollapsedStates() {
-            // 环境配置分组默认展开
+            // 环境配置分组默认折叠
             for (const key of Object.keys(ENV_CONFIG_SCHEMA)) {
-                this.envCollapsed[key] = false;
+                this.envCollapsed[key] = true;
             }
-            // 浏览器常量分组，根据 schema 的 collapsed 属性决定
-            for (const [key, group] of Object.entries(BROWSER_CONSTANTS_SCHEMA)) {
-                this.browserConstantsCollapsed[key] = group.collapsed || false;
+            // 浏览器常量分组默认折叠
+            for (const [key] of Object.entries(BROWSER_CONSTANTS_SCHEMA)) {
+                this.browserConstantsCollapsed[key] = true;
             }
         },
 
         // ========== 夜间模式 ==========
 
         applyDarkMode() {
-            if (this.darkMode) {
-                document.documentElement.classList.add('dark')
-            } else {
-                document.documentElement.classList.remove('dark')
+            const isDark = !!this.darkMode
+            const targets = [
+                document.documentElement,
+                document.body,
+                document.getElementById('app')
+            ].filter(Boolean)
+            for (const el of targets) {
+                el.classList.remove('dark', 'light')
+                el.classList.add(isDark ? 'dark' : 'light')
+                el.setAttribute('data-theme', isDark ? 'dark' : 'light')
             }
+            document.documentElement.style.colorScheme = isDark ? 'dark' : 'light'
         },
 
         toggleDarkMode() {
             this.darkMode = !this.darkMode
-            localStorage.setItem('darkMode', this.darkMode.toString())
             this.applyDarkMode()
+            try {
+                localStorage.setItem('darkMode', this.darkMode.toString())
+            } catch (e) {
+                // ignore storage failures and keep runtime theme switch available
+            }
             this.notify('已切换到' + (this.darkMode ? '夜间' : '日间') + '模式', 'success')
         },
 
@@ -1745,6 +1764,20 @@ const app = createApp({
                     return this.$refs.configTab.selectedPreset
                 }
             } catch (e) { }
+            const presets = this.currentConfig && this.currentConfig.presets
+            if (presets && typeof presets === 'object') {
+                const configuredDefault = this.currentConfig.default_preset
+                if (configuredDefault && presets[configuredDefault]) {
+                    return configuredDefault
+                }
+                if (presets['主预设']) {
+                    return '主预设'
+                }
+                const keys = Object.keys(presets)
+                if (keys.length > 0) {
+                    return keys[0]
+                }
+            }
             return '主预设'
         },
 
@@ -1753,7 +1786,12 @@ const app = createApp({
             const presets = this.currentConfig.presets
             if (!presets) return this.currentConfig
             const name = this.getActivePresetName()
-            return presets[name] || presets['主预设'] || Object.values(presets)[0] || null
+            const configuredDefault = this.currentConfig.default_preset
+            return presets[name]
+                || (configuredDefault ? presets[configuredDefault] : null)
+                || presets['主预设']
+                || Object.values(presets)[0]
+                || null
         },
 
         // ========== 数据操作 ==========
@@ -1778,11 +1816,21 @@ const app = createApp({
                             stealth: !!presetData.stealth
                         }
                     }
+                    const presetKeys = Object.keys(normalizedPresets)
+                    const configuredDefault = typeof v.default_preset === 'string'
+                        ? v.default_preset
+                        : null
+                    const resolvedDefault = (configuredDefault && normalizedPresets[configuredDefault])
+                        ? configuredDefault
+                        : (normalizedPresets['主预设'] ? '主预设' : (presetKeys[0] || '主预设'))
                     // 构建站点对象，只保留 presets，清理预设外的残留字段
-                    const siteObj = { presets: normalizedPresets }
+                    const siteObj = {
+                        presets: normalizedPresets,
+                        default_preset: resolvedDefault
+                    }
                     // 保留非预设字段（如未来可能的站点级元数据）
                     for (const [field, value] of Object.entries(v)) {
-                        if (field !== 'presets' && !PRESET_FIELDS.includes(field)) {
+                        if (field !== 'presets' && field !== 'default_preset' && !PRESET_FIELDS.includes(field)) {
                             siteObj[field] = value
                         }
                     }
@@ -1790,6 +1838,7 @@ const app = createApp({
                 } else {
                     // 旧格式兼容：包装为预设（后端迁移后不应再出现，但做兜底）
                     norm[k] = {
+                        default_preset: '主预设',
                         presets: {
                             '主预设': {
                                 ...v,
@@ -1886,6 +1935,7 @@ const app = createApp({
             }
 
             this.sites[domain] = {
+                default_preset: '主预设',
                 presets: {
                     '主预设': {
                         selectors: {},
@@ -2166,6 +2216,9 @@ const app = createApp({
             }
 
             site.presets = presets
+            if (!site.default_preset || !site.presets[site.default_preset]) {
+                site.default_preset = site.presets['主预设'] ? '主预设' : (Object.keys(site.presets)[0] || '主预设')
+            }
             this.sites[this.currentDomain] = site
 
             try {

@@ -27,7 +27,7 @@ window.SettingsTab = {
     ],
     data() {
         return {
-            selectorDefsCollapsed: false
+            selectorDefsCollapsed: true
         };
     },
     template: `

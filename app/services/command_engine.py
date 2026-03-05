@@ -95,6 +95,7 @@ def get_default_command() -> Dict[str, Any]:
             "scope": "all",
             "domain": "",
             "tab_index": None,
+            "priority": 2,
         },
         "actions": [
             {"type": "clear_cookies"},
@@ -131,8 +132,49 @@ class CommandEngine:
         self._network_events: Dict[str, List[Dict[str, Any]]] = {}
         # 正在执行的命令（防止重复触发）
         self._executing: set = set()
+        self._periodic_next_run: Dict[tuple, float] = {}
+        self._periodic_stop_event = threading.Event()
+        self._periodic_thread: Optional[threading.Thread] = None
+        self._pending_high_by_session: Dict[str, int] = {}
+        self._running_high_by_session: Dict[str, int] = {}
+        self._pending_high_by_domain: Dict[str, int] = {}
+        self._running_high_by_domain: Dict[str, int] = {}
+        try:
+            _baseline = int(os.getenv("CMD_REQUEST_PRIORITY_BASELINE", "2"))
+        except Exception:
+            _baseline = 2
+        self._request_priority_baseline = max(1, min(4, _baseline))
+        self._activate_tab_on_command = str(
+            os.getenv("CMD_ACTIVATE_TAB_ON_COMMAND", "false")
+        ).strip().lower() in {"1", "true", "yes", "y", "on"}
+        self._use_focus_emulation_on_command = str(
+            os.getenv("CMD_USE_FOCUS_EMULATION_ON_COMMAND", "true")
+        ).strip().lower() in {"1", "true", "yes", "y", "on"}
+        self._wake_tab_before_page_check = str(
+            os.getenv("CMD_WAKE_TAB_BEFORE_PAGE_CHECK", "true")
+        ).strip().lower() in {"1", "true", "yes", "y", "on"}
+        self._tab_pool_auto_refresh = str(
+            os.getenv("CMD_TAB_POOL_AUTO_REFRESH", "true")
+        ).strip().lower() in {"1", "true", "yes", "y", "on"}
+        try:
+            _refresh_interval = float(os.getenv("CMD_TAB_POOL_REFRESH_INTERVAL_SEC", "5"))
+        except Exception:
+            _refresh_interval = 5.0
+        self._tab_pool_refresh_interval_sec = max(1.0, _refresh_interval)
+        self._last_tab_pool_refresh_at = 0.0
+        self._periodic_keepalive_enabled = str(
+            os.getenv("CMD_PERIODIC_KEEPALIVE_ENABLED", "true")
+        ).strip().lower() in {"1", "true", "yes", "y", "on"}
+        try:
+            _keepalive_interval = float(os.getenv("CMD_PERIODIC_KEEPALIVE_INTERVAL_SEC", "20"))
+        except Exception:
+            _keepalive_interval = 20.0
+        self._periodic_keepalive_interval_sec = max(5.0, _keepalive_interval)
+        self._last_keepalive_by_session: Dict[str, float] = {}
+        self._last_tab_pool_wait_log_at = 0.0
 
         logger.debug("CommandEngine 初始化")
+        self._start_periodic_scheduler()
 
     # ================= 延迟依赖 =================
 
@@ -167,6 +209,189 @@ class CommandEngine:
                 pool.resume_global_network_monitor(session.id, reason=reason)
         except Exception as e:
             logger.debug(f"[CMD] 恢复全局网络监听失败（忽略）: {e}")
+
+    def _set_focus_emulation(self, session: 'TabSession', enabled: bool):
+        """Best-effort focus emulation without stealing OS/browser foreground focus."""
+        try:
+            session.tab.run_cdp("Emulation.setFocusEmulationEnabled", enabled=bool(enabled))
+        except Exception as e:
+            logger.debug(f"[CMD] focus emulation set({enabled}) failed (ignored): {e}")
+
+    def _try_wake_tab(self, session: 'TabSession', reason: str = ""):
+        """
+        Best-effort wake-up for background/discard-prone tabs.
+        Uses lifecycle and lightweight JS ping, without forcing browser focus.
+        """
+        if not self._wake_tab_before_page_check:
+            return
+        focus_emulation_set = False
+        try:
+            session.tab.run_cdp("Emulation.setFocusEmulationEnabled", enabled=True)
+            focus_emulation_set = True
+        except Exception:
+            pass
+        try:
+            session.tab.run_cdp("Page.setWebLifecycleState", state="active")
+        except Exception:
+            pass
+        try:
+            session.tab.run_js("return document.readyState || '';")
+        except Exception:
+            pass
+        finally:
+            if focus_emulation_set:
+                try:
+                    session.tab.run_cdp("Emulation.setFocusEmulationEnabled", enabled=False)
+                except Exception:
+                    pass
+
+    def _refresh_tab_pool_if_due(self, pool: Any):
+        if not self._tab_pool_auto_refresh:
+            return
+        now = time.time()
+        if (now - self._last_tab_pool_refresh_at) < self._tab_pool_refresh_interval_sec:
+            return
+        self._last_tab_pool_refresh_at = now
+        try:
+            if hasattr(pool, "refresh_tabs"):
+                pool.refresh_tabs()
+        except Exception as e:
+            logger.debug(f"[CMD] tab pool refresh failed (ignored): {e}")
+
+    def _maybe_periodic_keepalive(self, session: 'TabSession', now_ts: float):
+        if not self._periodic_keepalive_enabled:
+            return
+        sid = str(getattr(session, "id", "") or "")
+        if not sid:
+            return
+        last_at = float(self._last_keepalive_by_session.get(sid, 0.0) or 0.0)
+        if (now_ts - last_at) < self._periodic_keepalive_interval_sec:
+            return
+        self._last_keepalive_by_session[sid] = now_ts
+        self._try_wake_tab(session, reason="periodic_keepalive")
+
+    def _start_periodic_scheduler(self):
+        if self._periodic_thread and self._periodic_thread.is_alive():
+            return
+        self._periodic_stop_event.clear()
+        self._periodic_thread = threading.Thread(
+            target=self._periodic_loop,
+            daemon=True,
+            name="cmd-periodic-checker",
+        )
+        self._periodic_thread.start()
+        logger.debug("[CMD] periodic scheduler started")
+
+    def is_scheduler_running(self) -> bool:
+        thread = self._periodic_thread
+        return bool(thread and thread.is_alive())
+
+    def ensure_scheduler_running(self):
+        """Best-effort watchdog: start periodic checker if it is not running."""
+        if not self.is_scheduler_running():
+            self._start_periodic_scheduler()
+
+    def shutdown(self):
+        self._periodic_stop_event.set()
+        thread = self._periodic_thread
+        if thread and thread.is_alive():
+            thread.join(timeout=1.0)
+
+    def _periodic_loop(self):
+        while not self._periodic_stop_event.wait(1.0):
+            try:
+                self._run_periodic_checks()
+            except Exception as e:
+                logger.debug(f"[CMD] periodic loop error (ignored): {e}")
+
+    def _run_periodic_checks(self):
+        try:
+            commands = self._load_commands()
+        except Exception:
+            return
+        if not commands:
+            return
+
+        try:
+            browser = self._get_browser()
+        except Exception:
+            return
+
+        pool = getattr(browser, "_tab_pool", None)
+        if pool is None:
+            try:
+                pool = browser.tab_pool
+                logger.debug("[CMD] periodic scheduler initialized tab pool")
+            except Exception as e:
+                now = time.time()
+                if (now - self._last_tab_pool_wait_log_at) >= 10:
+                    self._last_tab_pool_wait_log_at = now
+                    logger.debug(f"[CMD] periodic scheduler waiting for tab pool init: {e}")
+                return
+
+        if not hasattr(pool, "get_idle_sessions_snapshot"):
+            return
+        self._refresh_tab_pool_if_due(pool)
+
+        sessions = pool.get_idle_sessions_snapshot()
+        if not sessions:
+            return
+
+        now = time.time()
+        active_keys = set()
+
+        enabled_commands = [
+            (idx, cmd) for idx, cmd in enumerate(commands)
+            if cmd.get("enabled", True)
+        ]
+
+        for session in sessions:
+            session_status = str(getattr(getattr(session, "status", None), "value", "")).lower()
+            if session_status != "idle":
+                continue
+            self._maybe_periodic_keepalive(session, now)
+
+            due_commands: List[tuple[int, int, Dict[str, Any]]] = []
+            for idx, cmd in enabled_commands:
+                cmd_id = str(cmd.get("id", "")).strip()
+                if not cmd_id:
+                    continue
+
+                trigger = cmd.get("trigger", {}) or {}
+                if not bool(trigger.get("periodic_enabled", True)):
+                    continue
+
+                key = (cmd_id, session.id)
+                active_keys.add(key)
+
+                interval = max(1.0, self._coerce_float(trigger.get("periodic_interval_sec", 8), 8.0))
+                jitter = max(0.0, self._coerce_float(trigger.get("periodic_jitter_sec", 2), 2.0))
+
+                with self._lock:
+                    next_at = float(self._periodic_next_run.get(key, 0.0))
+                if now < next_at:
+                    continue
+
+                delay = interval + (random.uniform(0.0, jitter) if jitter > 0 else 0.0)
+                with self._lock:
+                    self._periodic_next_run[key] = now + delay
+
+                due_commands.append((self._get_command_priority(cmd), idx, cmd))
+
+            due_commands.sort(key=lambda item: (-item[0], item[1]))
+            for _, _, cmd in due_commands:
+                if str(getattr(getattr(session, "status", None), "value", "")).lower() != "idle":
+                    break
+                if self._should_trigger(cmd, session):
+                    self._execute_command_async(cmd, session)
+
+        with self._lock:
+            stale_keys = [k for k in self._periodic_next_run if k not in active_keys]
+            for key in stale_keys:
+                self._periodic_next_run.pop(key, None)
+            stale_keepalive_keys = [k for k in self._last_keepalive_by_session if k not in {s.id for s in sessions}]
+            for key in stale_keepalive_keys:
+                self._last_keepalive_by_session.pop(key, None)
 
     def _get_commands_file(self) -> str:
         if self._commands_file is None:
@@ -475,7 +700,7 @@ class CommandEngine:
                     "ok": True,
                 })
             except Exception as e:
-                logger.error(f"[CMD] 执行命令组失败 [{cmd.get('name')}]: {e}")
+                logger.error(f"trigger check failed [{cmd.get('name')}]: {e}")
                 results.append({
                     "id": command_id,
                     "name": cmd.get("name", command_id),
@@ -502,6 +727,7 @@ class CommandEngine:
 
         在 TabSession.release() 后调用（锁外、后台，不阻塞主流程）
         """
+        self.ensure_scheduler_running()
         try:
             commands = self._load_commands()
         except Exception as e:
@@ -511,14 +737,19 @@ class CommandEngine:
         if not commands:
             return
 
-        for cmd in commands:
-            if not cmd.get("enabled", True):
-                continue
+
+        ordered_commands = [
+            (idx, cmd) for idx, cmd in enumerate(commands)
+            if cmd.get("enabled", True)
+        ]
+        ordered_commands.sort(key=lambda item: (-self._get_command_priority(item[1]), item[0]))
+
+        for _, cmd in ordered_commands:
             try:
                 if self._should_trigger(cmd, session):
                     self._execute_command_async(cmd, session)
             except Exception as e:
-                logger.error(f"触发检查异常 [{cmd.get('name')}]: {e}")
+                logger.error(f"trigger check failed [{cmd.get('name')}]: {e}")
 
     def handle_network_event(self, session: 'TabSession', event: Dict[str, Any]) -> bool:
         """
@@ -528,6 +759,7 @@ class CommandEngine:
         - True: 命中了“网络请求异常拦截”且应立即中断当前等待
         - False: 不需要中断
         """
+        self.ensure_scheduler_running()
         if not event:
             return False
 
@@ -619,16 +851,28 @@ class CommandEngine:
         hints.sort(key=len, reverse=True)
         return hints[0]
 
-    def _ensure_trigger_state(self, command_id: str, session: 'TabSession') -> tuple[Dict[str, Any], bool]:
-        state_key = (command_id, session.id)
+    def _ensure_trigger_state(
+        self,
+        command_id: str,
+        session: 'TabSession',
+        state_key: Optional[tuple] = None,
+        initial_req: Optional[int] = None,
+        initial_err: Optional[int] = None,
+    ) -> tuple[Dict[str, Any], bool]:
+        state_key = state_key or (command_id, session.id)
+        req_baseline = session.request_count if initial_req is None else int(initial_req)
+        err_baseline = session.error_count if initial_err is None else int(initial_err)
         with self._lock:
             state = self._trigger_states.get(state_key)
             if state is None:
                 state = {
-                    "req": session.request_count,
-                    "err": session.error_count,
+                    "req": req_baseline,
+                    "err": err_baseline,
                     "result_token": "",
                     "net_sig": "",
+                    "page_key": "",
+                    "page_hit": False,
+                    "page_last_fire_at": 0.0,
                 }
                 self._trigger_states[state_key] = state
                 return state, True
@@ -646,16 +890,186 @@ class CommandEngine:
         except Exception:
             return default
 
+
+    @staticmethod
+    def _counter_inc(counter: Dict[str, int], key: str):
+        if not key:
+            return
+        counter[key] = int(counter.get(key, 0)) + 1
+
+    @staticmethod
+    def _counter_dec(counter: Dict[str, int], key: str):
+        if not key:
+            return
+        next_value = int(counter.get(key, 0)) - 1
+        if next_value > 0:
+            counter[key] = next_value
+        else:
+            counter.pop(key, None)
+
+    def _normalize_priority(self, value: Any, default: int = 2) -> int:
+        try:
+            p = int(value)
+        except Exception:
+            p = int(default)
+        return max(1, min(4, p))
+
+    def _get_request_priority_baseline(self) -> int:
+        return self._normalize_priority(getattr(self, "_request_priority_baseline", 2), 2)
+
+    def _get_command_priority(self, command: Dict) -> int:
+        trigger = command.get("trigger", {}) or {}
+        raw = trigger.get("priority", trigger.get("command_priority", 2))
+        return self._normalize_priority(raw, 2)
+
+    def _command_affects_domain(self, command: Dict) -> bool:
+        actions = command.get("actions", [])
+        for action in actions or []:
+            if str((action or {}).get("type", "")).strip() == "clear_cookies":
+                return True
+        return False
+
+    def _has_busy_peer_on_domain(self, domain: str, exclude_session_id: str = "") -> bool:
+        normalized = str(domain or "").strip().lower()
+        if not normalized:
+            return False
+        try:
+            browser = self._get_browser()
+            pool = getattr(browser, "_tab_pool", None)
+            if pool is None:
+                return False
+            status = pool.get_status() if hasattr(pool, "get_status") else {}
+            for tab in status.get("tabs", []) or []:
+                sid = str(tab.get("id", "") or "")
+                if exclude_session_id and sid == exclude_session_id:
+                    continue
+                if str(tab.get("status", "")).lower() != "busy":
+                    continue
+                tab_domain = str(tab.get("current_domain", "") or "").strip().lower()
+                if tab_domain and normalized in tab_domain:
+                    return True
+        except Exception:
+            return False
+        return False
+
+    def should_block_request_for_session(self, session: "TabSession", task_id: str = "") -> bool:
+        if session is None:
+            return False
+        task = str(task_id or "").strip().lower()
+        if task.startswith("cmd_") or task.startswith("group_") or task.startswith("cmd_test_") or task.startswith("group_test_"):
+            return False
+
+        session_id = str(getattr(session, "id", "") or "")
+        domain = self._get_session_domain(session)
+        with self._lock:
+            if int(self._pending_high_by_session.get(session_id, 0)) > 0:
+                return True
+            if int(self._running_high_by_session.get(session_id, 0)) > 0:
+                return True
+            if domain and int(self._pending_high_by_domain.get(domain, 0)) > 0:
+                return True
+            if domain and int(self._running_high_by_domain.get(domain, 0)) > 0:
+                return True
+        return False
+
+
+    def _get_session_domain(self, session: 'TabSession') -> str:
+        domain = str(getattr(session, "current_domain", "") or "").strip().lower()
+        if domain:
+            return domain
+        try:
+            url = str(getattr(session.tab, "url", "") or "")
+            if "://" in url:
+                domain = url.split("//", 1)[1].split("/", 1)[0].strip().lower()
+                if domain:
+                    session.current_domain = domain
+                    return domain
+        except Exception:
+            pass
+        return ""
+
+
+    def _build_request_count_state_key(self, command: Dict, session: 'TabSession') -> tuple:
+        trigger = command.get("trigger", {}) or {}
+        scope = str(trigger.get("scope", "all") or "all").strip().lower()
+
+        if scope == "all":
+            return (command["id"], "__scope:all")
+
+        if scope == "domain":
+            domain_key = str(trigger.get("domain", "") or "").strip().lower()
+            if not domain_key:
+                domain_key = self._get_session_domain(session)
+            return (command["id"], f"__scope:domain:{domain_key or '_'}")
+
+        return (command["id"], session.id)
+
+    def _get_scope_request_count(self, command: Dict, session: 'TabSession') -> int:
+        trigger = command.get("trigger", {}) or {}
+        scope = str(trigger.get("scope", "all") or "all").strip().lower()
+
+        if scope == "tab":
+            try:
+                return int(getattr(session, "request_count", 0) or 0)
+            except Exception:
+                return 0
+
+        try:
+            browser = self._get_browser()
+            pool = getattr(browser, "_tab_pool", None)
+            if pool is None:
+                return int(getattr(session, "request_count", 0) or 0)
+            status = pool.get_status() if hasattr(pool, "get_status") else {}
+            tabs = status.get("tabs", []) or []
+        except Exception:
+            return int(getattr(session, "request_count", 0) or 0)
+
+        if scope == "all":
+            total = 0
+            for tab in tabs:
+                try:
+                    total += int(tab.get("request_count", 0) or 0)
+                except Exception:
+                    continue
+            return total
+
+        if scope == "domain":
+            target_domain = str(trigger.get("domain", "") or "").strip().lower()
+            if not target_domain:
+                target_domain = self._get_session_domain(session)
+            if not target_domain:
+                return int(getattr(session, "request_count", 0) or 0)
+
+            total = 0
+            for tab in tabs:
+                try:
+                    tab_domain = str(tab.get("current_domain", "") or "").strip().lower()
+                    if not tab_domain:
+                        url = str(tab.get("url", "") or "")
+                        if "://" in url:
+                            tab_domain = url.split("//", 1)[1].split("/", 1)[0].strip().lower()
+                    if tab_domain and target_domain in tab_domain:
+                        total += int(tab.get("request_count", 0) or 0)
+                except Exception:
+                    continue
+            return total
+
+        try:
+            return int(getattr(session, "request_count", 0) or 0)
+        except Exception:
+            return 0
+
     def _should_trigger(self, command: Dict, session: 'TabSession') -> bool:
         trigger = command.get("trigger", {})
         trigger_type = trigger.get("type", "")
         scope = trigger.get("scope", "all")
 
-        # 作用域过滤
+        # Scope pre-check
         if scope == "domain":
-            target_domain = trigger.get("domain", "")
-            if target_domain and session.current_domain:
-                if target_domain not in session.current_domain:
+            target_domain = str(trigger.get("domain", "") or "").strip().lower()
+            session_domain = self._get_session_domain(session)
+            if target_domain and session_domain:
+                if target_domain not in session_domain:
                     return False
             elif target_domain:
                 return False
@@ -664,27 +1078,49 @@ class CommandEngine:
             if target_index is not None and session.persistent_index != target_index:
                 return False
 
-        # 防重复执行
+        # Skip if same command already executing on this tab
         exec_key = (command["id"], session.id)
         if exec_key in self._executing:
             return False
 
-        # 获取/创建触发状态
-        state, is_new = self._ensure_trigger_state(command["id"], session)
-        if is_new:
-            return False  # 首次注册不触发
+        request_state_key = None
+        scope_request_count = None
+        if trigger_type == "request_count":
+            request_state_key = self._build_request_count_state_key(command, session)
+            scope_request_count = self._get_scope_request_count(command, session)
 
-        # 按类型检查
+        # Initialize or load trigger state
+        state, is_new = self._ensure_trigger_state(
+            command["id"],
+            session,
+            state_key=request_state_key,
+            initial_req=scope_request_count,
+        )
+        if is_new and trigger_type != "page_check":
+            return False  # Newly initialized: wait for next check cycle
+
+        # Evaluate trigger condition by trigger type
         if trigger_type == "request_count":
             threshold = max(1, self._coerce_int(trigger.get("value", 10), 10))
-            delta = session.request_count - state["req"]
-            if delta >= threshold:
+            current_count = (
+                int(scope_request_count)
+                if scope_request_count is not None
+                else self._get_scope_request_count(command, session)
+            )
+            with self._lock:
+                baseline = int(state.get("req", 0))
+                delta = current_count - baseline
+                should_fire = delta >= threshold
+                if should_fire:
+                    # 先记录旧基线；若后续因标签页忙碌/超时未实际执行，可回滚以便重试。
+                    state["req_prev"] = baseline
+                    state["req_pending"] = True
+                    state["req"] = current_count
+            if should_fire:
                 logger.info(
-                    f"[CMD] 触发: {command.get('name')} "
-                    f"(requests={delta}>={threshold}, tab={session.id})"
+                    f"[CMD] trigger: {command.get('name')} "
+                    f"(requests={delta}>={threshold}, tab={session.id}, scope={scope})"
                 )
-                with self._lock:
-                    state["req"] = session.request_count
                 return True
 
         elif trigger_type == "error_count":
@@ -692,7 +1128,7 @@ class CommandEngine:
             delta = session.error_count - state["err"]
             if delta >= threshold:
                 logger.info(
-                    f"[CMD] 触发: {command.get('name')} "
+                    f"[CMD] trigger: {command.get('name')} "
                     f"(errors={delta}>={threshold})"
                 )
                 with self._lock:
@@ -704,24 +1140,47 @@ class CommandEngine:
             idle = time.time() - session.last_used_at
             if idle >= threshold_sec:
                 logger.info(
-                    f"[CMD] 触发: {command.get('name')} "
+                    f"[CMD] trigger: {command.get('name')} "
                     f"(idle={idle:.0f}s>={threshold_sec}s)"
                 )
                 return True
 
         elif trigger_type == "page_check":
             check_text = str(trigger.get("value", ""))
-            if check_text and self._check_page_content(session, check_text):
-                logger.info(
-                    f"[CMD] 触发: {command.get('name')} "
-                    f"(page_check: '{check_text[:30]}')"
-                )
-                return True
+            normalized_text = check_text.lower().strip()
+            current_hit = bool(check_text and self._check_page_content(session, check_text))
+            fire_mode = str(trigger.get("fire_mode", "edge") or "edge").strip().lower()
+            cooldown_sec = max(0.0, self._coerce_float(trigger.get("cooldown_sec", 0), 0.0))
+            now_ts = time.time()
+
+            with self._lock:
+                prev_key = str(state.get("page_key", ""))
+                prev_hit = bool(state.get("page_hit", False)) if prev_key == normalized_text else False
+                state["page_key"] = normalized_text
+                state["page_hit"] = current_hit
+                last_fire_at = float(state.get("page_last_fire_at", 0.0) or 0.0)
+
+                if fire_mode == "level":
+                    if current_hit and (cooldown_sec <= 0 or (now_ts - last_fire_at) >= cooldown_sec):
+                        state["page_last_fire_at"] = now_ts
+                        logger.info(
+                            f"[CMD] trigger: {command.get('name')} "
+                            f"(page_check-level: '{check_text[:30]}', cooldown={cooldown_sec}s)"
+                        )
+                        return True
+                else:
+                    if current_hit and not prev_hit:
+                        state["page_last_fire_at"] = now_ts
+                        logger.info(
+                            f"[CMD] trigger: {command.get('name')} "
+                            f"(page_check-edge: '{check_text[:30]}')"
+                        )
+                        return True
 
         elif trigger_type == "command_result_match":
             if self._match_command_result_trigger(command, session, consume=True):
                 logger.info(
-                    f"[CMD] 触发: {command.get('name')} "
+                    f"[CMD] trigger: {command.get('name')} "
                     f"(command_result_match)"
                 )
                 return True
@@ -734,19 +1193,127 @@ class CommandEngine:
                     with self._lock:
                         state["net_sig"] = sig
                     logger.info(
-                        f"[CMD] 触发: {command.get('name')} "
+                        f"[CMD] trigger: {command.get('name')} "
                         f"(network_request_error status={event.get('status')}, url={event.get('url', '')[:80]})"
                     )
                     return True
 
         return False
 
+    def _text_contains_needle(self, haystack: str, needle: str) -> bool:
+        hay = str(haystack or "").strip().lower()
+        ned = str(needle or "").strip().lower()
+        if not hay or not ned:
+            return False
+
+        # For plain word-like keywords (for example "battle"), prefer whole-word
+        # matching to reduce accidental substring hits.
+        if re.fullmatch(r"[a-z0-9 _-]+", ned):
+            pattern = rf"(?<![a-z0-9]){re.escape(ned)}(?![a-z0-9])"
+            return re.search(pattern, hay) is not None
+
+        return ned in hay
+
     def _check_page_content(self, session: 'TabSession', text: str) -> bool:
+        needle = str(text or "").strip()
+        if not needle:
+            return False
+
+        self._try_wake_tab(session, reason="page_check")
+
+        body_text = ""
         try:
-            html = session.tab.html or ""
-            return text.lower() in html.lower()
+            body_text = str(
+                session.tab.run_js(
+                    "return (document.body && document.body.innerText) ? document.body.innerText : '';"
+                ) or ""
+            )
+        except Exception:
+            body_text = ""
+
+        if body_text.strip():
+            return self._text_contains_needle(body_text, needle)
+
+        # Fallback to title only if body text is unavailable.
+        try:
+            title = str(session.tab.run_js("return document.title || '';") or "")
+            return self._text_contains_needle(title, needle)
         except Exception:
             return False
+
+    def _reset_page_check_latch(self, command: Dict, session: 'TabSession', reason: str = ""):
+        """Allow page_check commands to retrigger when previous execution did not complete successfully."""
+        trigger = command.get("trigger", {}) or {}
+        if str(trigger.get("type", "")).strip().lower() != "page_check":
+            return
+
+        key = (command.get("id"), getattr(session, "id", ""))
+        if not key[0] or not key[1]:
+            return
+
+        normalized_text = str(trigger.get("value", "") or "").strip().lower()
+        with self._lock:
+            state = self._trigger_states.get(key)
+            if not state:
+                return
+            state["page_key"] = normalized_text
+            state["page_hit"] = False
+
+        if reason:
+            logger.debug(f"[CMD] page_check latch reset: {command.get('name')} (tab={session.id}, reason={reason})")
+
+    def _finalize_request_count_trigger_state(
+        self,
+        command: Dict,
+        session: 'TabSession',
+        *,
+        rollback: bool = False
+    ):
+        """
+        收尾 request_count 触发状态：
+        - rollback=True: 未实际执行时回滚 req 到触发前基线，避免触发被“吃掉”
+        - rollback=False: 实际开始执行后清理 pending 标记
+        """
+        trigger = command.get("trigger", {}) or {}
+        if str(trigger.get("type", "")).strip().lower() != "request_count":
+            return
+
+        key = self._build_request_count_state_key(command, session)
+        with self._lock:
+            state = self._trigger_states.get(key)
+            if not state:
+                return
+
+            pending = bool(state.pop("req_pending", False))
+            prev_req = state.pop("req_prev", None)
+            if rollback and pending and prev_req is not None:
+                try:
+                    state["req"] = int(prev_req)
+                except Exception:
+                    pass
+
+    @staticmethod
+    def _execution_needs_page_check_retry(execution_result: Any) -> bool:
+        """
+        Determine whether a page_check-triggered command should be retried.
+        Retry signal is inferred from action results shaped like {"ok": False, ...}.
+        """
+        if not isinstance(execution_result, dict):
+            return False
+
+        direct_result = execution_result.get("result")
+        if isinstance(direct_result, dict) and direct_result.get("ok") is False:
+            return True
+
+        steps = execution_result.get("steps")
+        if isinstance(steps, list):
+            for step in steps:
+                if not isinstance(step, dict):
+                    continue
+                step_result = step.get("result")
+                if isinstance(step_result, dict) and step_result.get("ok") is False:
+                    return True
+        return False
 
     def _normalize_match_rule(self, rule: Any) -> str:
         rule_value = str(rule or "").strip().lower()
@@ -948,9 +1515,10 @@ class CommandEngine:
         scope = trigger.get("scope", "all")
 
         if scope == "domain":
-            target_domain = trigger.get("domain", "")
-            if target_domain and session.current_domain:
-                return target_domain in session.current_domain
+            target_domain = str(trigger.get("domain", "") or "").strip().lower()
+            session_domain = self._get_session_domain(session)
+            if target_domain and session_domain:
+                return target_domain in session_domain
             return not target_domain
 
         if scope == "tab":
@@ -1058,18 +1626,129 @@ class CommandEngine:
         chain: Optional[List[str]] = None,
     ):
         exec_key = (command["id"], session.id)
-        self._executing.add(exec_key)
+        priority = self._get_command_priority(command)
+        baseline = self._get_request_priority_baseline()
+        is_high = priority > baseline
+        domain = self._get_session_domain(session)
+        domain_sensitive = bool(domain) and self._command_affects_domain(command)
+
+        with self._lock:
+            if exec_key in self._executing:
+                return
+            self._executing.add(exec_key)
+            if is_high:
+                self._counter_inc(self._pending_high_by_session, session.id)
+                if domain_sensitive:
+                    self._counter_inc(self._pending_high_by_domain, domain)
 
         def _run():
+            acquired = False
+            moved_running = False
+            focus_emulation_applied = False
+            cmd_task_id = f"cmd_{command['id'][:8]}_{int(time.time() * 1000)}"
+            trigger = command.get("trigger", {}) or {}
+            acquire_timeout = max(1.0, self._coerce_float(trigger.get("acquire_timeout_sec", 20), 20.0))
+            deadline = time.time() + acquire_timeout
+
             try:
-                self._execute_command(command, session, chain=chain)
+                while time.time() < deadline:
+                    if is_high and domain_sensitive:
+                        if self._has_busy_peer_on_domain(domain, exclude_session_id=session.id):
+                            time.sleep(0.05)
+                            continue
+
+                    if not is_high:
+                        try:
+                            from app.services.request_manager import request_manager
+                            status_counts = (request_manager.get_status() or {}).get("status_counts", {})
+                            queued_count = int(status_counts.get("queued", 0) or 0)
+                            if queued_count > 0:
+                                time.sleep(0.05)
+                                continue
+                        except Exception:
+                            pass
+
+                    if hasattr(session, "acquire_for_command") and session.acquire_for_command(cmd_task_id):
+                        acquired = True
+                        break
+                    status_value = str(getattr(getattr(session, "status", None), "value", "")).lower()
+                    if status_value in {"closed", "error"}:
+                        break
+                    time.sleep(0.05)
+
+                if not acquired:
+                    logger.info(
+                        f"[CMD] skip (tab busy/timeout): {command.get('name')} "
+                        f"priority={priority}, timeout={acquire_timeout}s, tab={session.id}"
+                    )
+                    self._finalize_request_count_trigger_state(command, session, rollback=True)
+                    self._reset_page_check_latch(command, session, reason="acquire_timeout")
+                    return
+
+                self._finalize_request_count_trigger_state(command, session, rollback=False)
+
+                # Optional focus behavior: disabled by default to avoid stealing user focus.
+                if self._activate_tab_on_command:
+                    try:
+                        browser = self._get_browser()
+                        pool = getattr(browser, "_tab_pool", None)
+                        active_id = getattr(pool, "_active_session_id", None) if pool is not None else None
+                        if active_id != session.id and hasattr(session, "activate"):
+                            session.activate()
+                            if pool is not None:
+                                pool._active_session_id = session.id
+                    except Exception as e:
+                        logger.debug(f"[CMD] activate target tab failed (ignored): {e}")
+                elif self._use_focus_emulation_on_command:
+                    self._set_focus_emulation(session, True)
+                    focus_emulation_applied = True
+
+                if is_high:
+                    with self._lock:
+                        self._counter_dec(self._pending_high_by_session, session.id)
+                        self._counter_inc(self._running_high_by_session, session.id)
+                        if domain_sensitive:
+                            self._counter_dec(self._pending_high_by_domain, domain)
+                            self._counter_inc(self._running_high_by_domain, domain)
+                    moved_running = True
+
+                execution_result = self._execute_command(command, session, chain=chain)
+                if self._execution_needs_page_check_retry(execution_result):
+                    self._reset_page_check_latch(command, session, reason="execution_not_ok")
             except Exception as e:
-                logger.error(f"[CMD] 命令执行失败 [{command.get('name')}]: {e}")
+                logger.error(f"[CMD] command execution failed [{command.get('name')}]: {e}")
+                if not acquired:
+                    self._finalize_request_count_trigger_state(command, session, rollback=True)
+                self._reset_page_check_latch(command, session, reason="execution_exception")
             finally:
-                self._executing.discard(exec_key)
+                if focus_emulation_applied:
+                    self._set_focus_emulation(session, False)
+                if acquired:
+                    try:
+                        browser = self._get_browser()
+                        pool = getattr(browser, "_tab_pool", None)
+                        if pool is not None and hasattr(pool, "release"):
+                            pool.release(session.id, check_triggers=False)
+                        else:
+                            session.release(clear_page=False, check_triggers=False)
+                    except Exception as e:
+                        logger.debug(f"[CMD] command release failed (ignored): {e}")
+
+                with self._lock:
+                    if is_high:
+                        if moved_running:
+                            self._counter_dec(self._running_high_by_session, session.id)
+                            if domain_sensitive:
+                                self._counter_dec(self._running_high_by_domain, domain)
+                        else:
+                            self._counter_dec(self._pending_high_by_session, session.id)
+                            if domain_sensitive:
+                                self._counter_dec(self._pending_high_by_domain, domain)
+                    self._executing.discard(exec_key)
 
         thread = threading.Thread(
-            target=_run, daemon=True,
+            target=_run,
+            daemon=True,
             name=f"cmd-{command['id'][:8]}"
         )
         thread.start()
@@ -1079,7 +1758,7 @@ class CommandEngine:
         command: Dict,
         session: 'TabSession',
         chain: Optional[List[str]] = None,
-    ):
+    ) -> Dict[str, Any]:
         cmd_name = command.get("name", "未命名")
         mode = command.get("mode", "simple")
 
@@ -1099,6 +1778,7 @@ class CommandEngine:
             logger.debug(f"[CMD] ✅ 完成: {cmd_name}")
             self._trigger_chained_commands(command, session, chain=chain)
             self._trigger_result_match_commands(command, session, chain=chain)
+            return execution_result
         finally:
             self._resume_tab_global_network(session, reason=f"command:{command.get('id', '')}")
 
@@ -1286,23 +1966,36 @@ class CommandEngine:
             browser = self._get_browser()
             preset_name = str(action.get("preset_name", "")).strip()
             prompt = str(action.get("prompt", ""))
+            timeout_default_raw = os.getenv("CMD_EXECUTE_WORKFLOW_TIMEOUT_SEC", "45")
+            timeout_sec = max(
+                1.0,
+                self._coerce_float(action.get("timeout_sec", timeout_default_raw), 45.0)
+            )
+            started_at = time.time()
+            deadline = started_at + timeout_sec
+            timed_out = False
+
+            def _action_stop_checker() -> bool:
+                nonlocal timed_out
+                if time.time() >= deadline:
+                    timed_out = True
+                    return True
+                return False
 
             if preset_name:
                 effective_preset = preset_name
                 logger.debug(
-                    f"[CMD] 开始执行工作流: tab=#{session.persistent_index}, preset={effective_preset}"
+                    f"[CMD] 开始执行工作流: tab=#{session.persistent_index}, "
+                    f"preset={effective_preset}, timeout={timeout_sec}s"
                 )
 
                 messages = [{"role": "user", "content": prompt}]
-                chunks = list(
-                    browser._execute_workflow_non_stream(
-                        session,
-                        messages,
-                        preset_name=preset_name,
-                    )
-                )
-
-                for chunk in chunks:
+                for chunk in browser._execute_workflow_non_stream(
+                    session,
+                    messages,
+                    preset_name=preset_name,
+                    stop_checker=_action_stop_checker,
+                ):
                     payload = chunk[6:].strip() if chunk.startswith("data: ") else chunk
                     if not payload:
                         continue
@@ -1313,6 +2006,17 @@ class CommandEngine:
                     if isinstance(data, dict) and data.get("error"):
                         logger.warning(f"[CMD] 工作流返回错误: {data['error']}")
                         return {"ok": False, "error": data["error"]}
+                if timed_out:
+                    logger.warning(
+                        f"[CMD] 工作流执行超时: tab=#{session.persistent_index}, "
+                        f"preset={effective_preset}, timeout={timeout_sec}s"
+                    )
+                    return {
+                        "ok": False,
+                        "error": f"workflow_timeout:{timeout_sec}s",
+                        "timeout": timeout_sec,
+                        "preset": effective_preset,
+                    }
 
                 logger.debug(
                     f"[CMD] 工作流执行完成: tab=#{session.persistent_index}, preset={effective_preset}"
@@ -1321,13 +2025,16 @@ class CommandEngine:
 
             effective_preset = session.preset_name or "主预设"
             logger.debug(
-                f"[CMD] 开始执行工作流: tab=#{session.persistent_index}, preset={effective_preset}"
+                f"[CMD] 开始执行工作流: tab=#{session.persistent_index}, "
+                f"preset={effective_preset}, timeout={timeout_sec}s"
             )
 
             messages = [{"role": "user", "content": prompt}]
-            chunks = list(browser._execute_workflow_non_stream(session, messages))
-
-            for chunk in chunks:
+            for chunk in browser._execute_workflow_non_stream(
+                session,
+                messages,
+                stop_checker=_action_stop_checker,
+            ):
                 payload = chunk[6:].strip() if chunk.startswith("data: ") else chunk
                 if not payload:
                     continue
@@ -1338,6 +2045,17 @@ class CommandEngine:
                 if isinstance(data, dict) and data.get("error"):
                     logger.warning(f"[CMD] 工作流返回错误: {data['error']}")
                     return {"ok": False, "error": data["error"]}
+            if timed_out:
+                logger.warning(
+                    f"[CMD] 工作流执行超时: tab=#{session.persistent_index}, "
+                    f"preset={effective_preset}, timeout={timeout_sec}s"
+                )
+                return {
+                    "ok": False,
+                    "error": f"workflow_timeout:{timeout_sec}s",
+                    "timeout": timeout_sec,
+                    "preset": effective_preset,
+                }
 
             logger.debug(
                 f"[CMD] 工作流执行完成: tab=#{session.persistent_index}, preset={effective_preset}"

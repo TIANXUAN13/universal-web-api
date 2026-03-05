@@ -380,6 +380,7 @@ class ConfigEngine:
             
             # 构建新格式
             self.sites[domain] = {
+                "default_preset": DEFAULT_PRESET_NAME,
                 "presets": {
                     DEFAULT_PRESET_NAME: preset_data
                 }
@@ -401,6 +402,7 @@ class ConfigEngine:
         这些残留通常由旧版 bug 或手动编辑产生。
         """
         cleaned_count = 0
+        default_fixed_count = 0
         
         for domain in list(self.sites.keys()):
             if domain.startswith('_'):
@@ -425,10 +427,58 @@ class ConfigEngine:
                 del site_config[key]
                 cleaned_count += 1
                 logger.debug(f"清理残留: {domain}.{key}")
-        
-        if cleaned_count > 0:
+
+            if self._normalize_site_default_preset(domain, site_config):
+                default_fixed_count += 1
+                logger.debug(f"修正默认预设: {domain} -> {site_config.get('default_preset')}")
+
+        if cleaned_count > 0 or default_fixed_count > 0:
             self._save_config()
-            logger.info(f"✅ 已清理 {cleaned_count} 个预设外残留字段")
+            logger.info(
+                f"✅ 已清理 {cleaned_count} 个预设外残留字段，"
+                f"修正 {default_fixed_count} 个站点默认预设"
+            )
+
+    def _resolve_default_preset_name(self, site: Dict[str, Any]) -> Optional[str]:
+        """解析站点有效默认预设名（不修改原对象）"""
+        presets = site.get("presets", {})
+        if not presets:
+            return None
+
+        configured_default = site.get("default_preset")
+        if isinstance(configured_default, str):
+            configured_default = configured_default.strip()
+        else:
+            configured_default = None
+
+        if configured_default and configured_default in presets:
+            return configured_default
+
+        if DEFAULT_PRESET_NAME in presets:
+            return DEFAULT_PRESET_NAME
+
+        return next(iter(presets))
+
+    def _normalize_site_default_preset(self, domain: str, site: Dict[str, Any]) -> bool:
+        """
+        规范化站点 default_preset 字段
+
+        Returns:
+            是否发生修改
+        """
+        resolved = self._resolve_default_preset_name(site)
+
+        if resolved is None:
+            if "default_preset" in site:
+                del site["default_preset"]
+                return True
+            return False
+
+        if site.get("default_preset") != resolved:
+            site["default_preset"] = resolved
+            return True
+
+        return False
     
     def _get_site_data(self, domain: str, preset_name: str = None) -> Optional[Dict]:
         """
@@ -455,18 +505,24 @@ class ConfigEngine:
         if not presets:
             return None
         
-        target = preset_name or DEFAULT_PRESET_NAME
-        
+        resolved_default = self._resolve_default_preset_name(site)
+        target = preset_name or resolved_default
+
         # 1. 尝试精确匹配
-        if target in presets:
+        if target and target in presets:
             return presets[target]
-        
-        # 2. 回退到默认预设
+
+        # 2. 回退到站点默认预设
+        if resolved_default and resolved_default in presets:
+            logger.debug(f"预设 '{target}' 不存在，回退到站点默认预设 '{resolved_default}'")
+            return presets[resolved_default]
+
+        # 3. 回退到主预设
         if DEFAULT_PRESET_NAME in presets:
             logger.debug(f"预设 '{target}' 不存在，回退到 '{DEFAULT_PRESET_NAME}'")
             return presets[DEFAULT_PRESET_NAME]
-        
-        # 3. 使用第一个可用预设
+
+        # 4. 使用第一个可用预设
         first_key = next(iter(presets))
         logger.warning(f"默认预设不存在，使用第一个预设: '{first_key}'")
         return presets[first_key]
@@ -488,6 +544,37 @@ class ConfigEngine:
         site = self.sites[domain]
         presets = site.get("presets", {})
         return list(presets.keys())
+
+    def get_default_preset(self, domain: str) -> Optional[str]:
+        """获取指定站点的默认预设名称（已解析回退）"""
+        self.refresh_if_changed()
+
+        site = self.sites.get(domain)
+        if not site:
+            return None
+
+        return self._resolve_default_preset_name(site)
+
+    def set_default_preset(self, domain: str, preset_name: str) -> bool:
+        """设置指定站点的默认预设"""
+        self.refresh_if_changed()
+
+        site = self.sites.get(domain)
+        if not site:
+            return False
+
+        presets = site.get("presets", {})
+        if preset_name not in presets:
+            logger.warning(f"默认预设设置失败，预设不存在: {domain}/{preset_name}")
+            return False
+
+        if site.get("default_preset") == preset_name:
+            return True
+
+        site["default_preset"] = preset_name
+        self._save_config()
+        logger.info(f"✅ 站点 {domain} 默认预设已设置为: '{preset_name}'")
+        return True
     
     def create_preset(self, domain: str, new_name: str, 
                       source_name: str = None) -> bool:
@@ -530,6 +617,7 @@ class ConfigEngine:
         
         # 深拷贝创建新预设
         presets[new_name] = copy.deepcopy(source_data)
+        self._normalize_site_default_preset(domain, site)
         self._save_config()
         
         logger.info(f"✅ 站点 {domain} 创建预设: '{new_name}' (克隆自 '{source}')")
@@ -563,6 +651,7 @@ class ConfigEngine:
             return False
         
         del presets[preset_name]
+        self._normalize_site_default_preset(domain, site)
         self._save_config()
         
         logger.info(f"✅ 站点 {domain} 删除预设: '{preset_name}'")
@@ -585,6 +674,8 @@ class ConfigEngine:
             logger.warning(f"预设名已存在: {new_name}")
             return False
         
+        default_preset = site.get("default_preset")
+
         # 保持顺序：创建有序副本
         new_presets = {}
         for key, value in presets.items():
@@ -592,8 +683,11 @@ class ConfigEngine:
                 new_presets[new_name] = value
             else:
                 new_presets[key] = value
-        
+
         site["presets"] = new_presets
+        if default_preset == old_name:
+            site["default_preset"] = new_name
+        self._normalize_site_default_preset(domain, site)
         self._save_config()
         
         logger.info(f"✅ 站点 {domain} 重命名预设: '{old_name}' → '{new_name}'")
@@ -682,7 +776,7 @@ class ConfigEngine:
             if changed:
                 self._save_config()
             
-            used_preset = preset_name or DEFAULT_PRESET_NAME
+            used_preset = preset_name or self.get_default_preset(domain) or DEFAULT_PRESET_NAME
             logger.debug(f"使用缓存配置: {domain} [预设: {used_preset}]")
             return copy.deepcopy(config)
         
@@ -708,6 +802,7 @@ class ConfigEngine:
             }
             
             self.sites[domain] = {
+                "default_preset": DEFAULT_PRESET_NAME,
                 "presets": {
                     DEFAULT_PRESET_NAME: new_preset
                 }
@@ -734,6 +829,7 @@ class ConfigEngine:
         }
         
         self.sites[domain] = {
+            "default_preset": DEFAULT_PRESET_NAME,
             "presets": {
                 DEFAULT_PRESET_NAME: fallback_preset
             }
@@ -919,7 +1015,7 @@ class ConfigEngine:
         return True
     
     def get_all_file_paste_configs(self) -> dict:
-        """获取所有站点的文件粘贴配置（使用各站点的主预设）"""
+        """获取所有站点的文件粘贴配置（使用各站点当前默认预设）"""
         self.refresh_if_changed()
         
         default_config = get_default_file_paste_config()

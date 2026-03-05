@@ -41,10 +41,10 @@ window.SidebarComponent = {
                 <div class="flex items-center justify-between mb-2">
                     <span class="text-sm font-semibold dark:text-white">服务状态</span>
                     <div class="flex gap-2">
-                        <button @click.stop="$emit('toggle-dark')"
-                                class="text-xs hover:text-blue-700 dark:hover:text-blue-400"
+                        <button @click.prevent.stop="$emit('toggle-dark')"
+                                class="rounded-md border border-gray-200 px-2 py-0.5 text-xs text-gray-600 transition hover:bg-gray-100 hover:text-blue-700 dark:border-gray-600 dark:text-gray-300 dark:hover:bg-gray-700 dark:hover:text-blue-300"
                                 :title="darkMode ? '切换到日间模式' : '切换到夜间模式'">
-                            {{ darkMode ? '☀️' : '🌙' }}
+                            {{ darkMode ? '☀️ 日间' : '🌙 夜间' }}
                         </button>
                         <button @click="$emit('refresh-status')" 
                                 class="text-xs text-blue-500 hover:text-blue-700 dark:text-blue-400 dark:hover:text-blue-300">

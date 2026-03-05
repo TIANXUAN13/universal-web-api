@@ -1,8 +1,8 @@
 ﻿// ==================== CommandsTab Template ====================
 window.CommandsTabTemplate = `
-    <div class="p-6 space-y-6">
+    <div class="p-4 space-y-4">
         <!-- 标题栏 -->
-        <div class="flex flex-col gap-4 rounded-3xl border border-slate-200/80 bg-[linear-gradient(135deg,rgba(255,255,255,0.98),rgba(241,245,249,0.92))] p-6 shadow-[0_20px_55px_-38px_rgba(15,23,42,0.7)] dark:border-slate-700/70 dark:bg-[linear-gradient(145deg,rgba(15,23,42,0.98),rgba(30,41,59,0.92))] lg:flex-row lg:items-center lg:justify-between">
+        <div class="flex flex-col gap-3 rounded-2xl border border-slate-200/80 bg-[linear-gradient(135deg,rgba(255,255,255,0.98),rgba(241,245,249,0.92))] p-4 shadow-[0_14px_36px_-32px_rgba(15,23,42,0.55)] dark:border-slate-700/70 dark:bg-[linear-gradient(145deg,rgba(15,23,42,0.98),rgba(30,41,59,0.92))] lg:flex-row lg:items-center lg:justify-between">
             <div>
                 <h2 class="text-xl font-bold dark:text-white">⚡ 自动化命令</h2>
                 <p class="text-sm text-gray-500 dark:text-gray-400 mt-1">
@@ -11,15 +11,15 @@ window.CommandsTabTemplate = `
             </div>
             <div class="flex flex-wrap items-center gap-3">
                 <button @click.stop="toggleHelp"
-                        class="flex h-10 w-10 items-center justify-center rounded-2xl border border-amber-300/60 bg-white/80 text-sm font-bold text-amber-600 transition hover:bg-amber-50 dark:border-amber-500/30 dark:bg-slate-900/70 dark:text-amber-300 dark:hover:bg-slate-800">
+                        class="flex h-9 w-9 items-center justify-center rounded-xl border border-amber-300/60 bg-white/80 text-sm font-bold text-amber-600 transition hover:bg-amber-50 dark:border-amber-500/30 dark:bg-slate-900/70 dark:text-amber-300 dark:hover:bg-slate-800">
                     ?
                 </button>
                 <button @click="fetchCommands" :disabled="loading"
-                        class="rounded-2xl border border-slate-300/80 bg-white/85 px-4 py-2.5 text-sm font-medium text-slate-700 transition hover:bg-slate-100 dark:border-slate-600 dark:bg-slate-900/70 dark:text-white dark:hover:bg-slate-800">
+                        class="rounded-xl border border-slate-300/80 bg-white/85 px-3 py-2 text-sm font-medium text-slate-700 transition hover:bg-slate-100 dark:border-slate-600 dark:bg-slate-900/70 dark:text-white dark:hover:bg-slate-800">
                     {{ loading ? '刷新中...' : '刷新' }}
                 </button>
                 <button @click="openNewCommand"
-                        class="rounded-2xl bg-blue-500 px-4 py-2.5 text-sm font-semibold text-white shadow-lg shadow-blue-500/20 transition hover:bg-blue-600">
+                        class="rounded-xl bg-blue-500 px-3 py-2 text-sm font-semibold text-white shadow-md shadow-blue-500/20 transition hover:bg-blue-600">
                     + 新建命令
                 </button>
             </div>
@@ -44,7 +44,7 @@ window.CommandsTabTemplate = `
         </div>
 
         <!-- 命令列表 -->
-        <div v-if="commands.length > 0" class="rounded-2xl border border-slate-200/80 bg-white/80 p-4 shadow-sm dark:border-slate-700/70 dark:bg-slate-900/70">
+        <div v-if="commands.length > 0" class="rounded-xl border border-slate-200/80 bg-white/80 p-3 shadow-sm dark:border-slate-700/70 dark:bg-slate-900/70">
             <div class="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
                 <div class="flex flex-wrap items-center gap-3 text-sm text-slate-600 dark:text-slate-300">
                     <span class="rounded-full bg-slate-900/5 px-3 py-1.5 dark:bg-white/5">总数 {{ commands.length }}</span>
@@ -54,15 +54,21 @@ window.CommandsTabTemplate = `
                 </div>
                 <label class="flex items-center gap-2 text-sm text-slate-600 dark:text-slate-300">
                     <span>每页</span>
-                    <select v-model.number="pageSize" @change="changePage(1)"
-                            class="rounded-xl border border-slate-200 bg-white px-3 py-2 dark:border-slate-700 dark:bg-slate-950 dark:text-slate-200">
+                    <input v-model.number="pageSize"
+                           @change="applyPageSize"
+                           type="number"
+                           min="1"
+                           max="500"
+                           list="command-page-size-options"
+                           class="w-24 rounded-xl border border-slate-200 bg-white px-3 py-2 dark:border-slate-700 dark:bg-slate-950 dark:text-slate-200">
+                    <datalist id="command-page-size-options">
                         <option v-for="size in pageSizeOptions" :key="size" :value="size">{{ size }}</option>
-                    </select>
+                    </datalist>
                 </label>
             </div>
         </div>
 
-        <div v-if="commands.length > 0" class="rounded-2xl border border-sky-200/80 bg-[linear-gradient(135deg,rgba(240,249,255,0.96),rgba(238,242,255,0.92))] p-3 shadow-sm dark:border-sky-800/60 dark:bg-[linear-gradient(145deg,rgba(10,25,47,0.7),rgba(30,41,59,0.75))]">
+        <div v-if="commands.length > 0" class="rounded-xl border border-sky-200/80 bg-[linear-gradient(135deg,rgba(240,249,255,0.96),rgba(238,242,255,0.92))] p-2.5 shadow-sm dark:border-sky-800/60 dark:bg-[linear-gradient(145deg,rgba(10,25,47,0.7),rgba(30,41,59,0.75))]">
             <div class="flex flex-wrap items-center justify-between gap-2">
                 <div class="flex flex-wrap items-center gap-2 text-xs text-slate-600 dark:text-slate-300">
                     <span class="rounded-full bg-slate-900/5 px-3 py-1.5 dark:bg-white/5">命令组 {{ commandGroups.length }}</span>
@@ -84,12 +90,29 @@ window.CommandsTabTemplate = `
                 </button>
                 <input v-model.trim="pendingGroupName"
                        type="text"
+                       list="existing-command-groups"
                        placeholder="命令组名称（留空自动）"
                        class="rounded-xl border border-slate-200 bg-white px-3 py-2 text-xs text-slate-700 dark:border-slate-700 dark:bg-slate-950 dark:text-slate-200">
+                <datalist id="existing-command-groups">
+                    <option v-for="group in commandGroups" :key="'group_hint_' + group.name" :value="group.name"></option>
+                </datalist>
                 <button @click="assignSelectedToGroup"
                         :disabled="groupWorking || !hasSelection"
                         class="rounded-xl bg-sky-600 px-3 py-2 text-xs font-semibold text-white transition hover:bg-sky-700 disabled:opacity-40">
                     收纳为命令组
+                </button>
+                <select v-model="selectedExistingGroupName"
+                        :disabled="groupWorking || commandGroups.length === 0"
+                        class="rounded-xl border border-slate-200 bg-white px-3 py-2 text-xs text-slate-700 disabled:opacity-40 dark:border-slate-700 dark:bg-slate-950 dark:text-slate-200">
+                    <option value="" disabled>选择已有命令组</option>
+                    <option v-for="group in commandGroups" :key="'group_pick_' + group.name" :value="group.name">
+                        {{ group.name }}
+                    </option>
+                </select>
+                <button @click="assignSelectedToExistingGroup"
+                        :disabled="groupWorking || !hasSelection || !selectedExistingGroupName"
+                        class="rounded-xl border border-sky-300 bg-sky-50 px-3 py-2 text-xs font-semibold text-sky-700 transition hover:bg-sky-100 disabled:opacity-40 dark:border-sky-700 dark:bg-sky-900/30 dark:text-sky-300 dark:hover:bg-sky-900/40">
+                    加入已有组
                 </button>
                 <button @click="ungroupSelectedCommands"
                         :disabled="groupWorking || !hasSelection"
@@ -100,13 +123,21 @@ window.CommandsTabTemplate = `
                     <input type="checkbox" v-model="includeDisabledWhenRunGroup">
                     执行组时包含禁用命令
                 </label>
+                <span class="text-xs text-slate-500 dark:text-slate-400">可直接拖动命令卡片到某个组头完成收纳</span>
             </div>
         </div>
 
         <div class="space-y-3">
             <div v-for="row in paginatedDisplayRows" :key="row.key"
-                 :class="row.isGroup ? 'rounded-2xl border border-sky-200/80 bg-sky-50/50 p-3 dark:border-sky-800/50 dark:bg-sky-900/10' : ''">
-                <div v-if="row.isGroup" class="flex flex-wrap items-center justify-between gap-2">
+                 :class="[
+                    row.isGroup ? 'rounded-xl border border-sky-200/80 bg-sky-50/50 p-2.5 dark:border-sky-800/50 dark:bg-sky-900/10' : '',
+                    row.isGroup && isGroupDropTarget(row.groupName) ? 'ring-2 ring-sky-400 ring-offset-1 ring-offset-white dark:ring-offset-slate-900' : ''
+                 ]">
+                <div v-if="row.isGroup"
+                     @dragover.prevent="onGroupDragOver(row.groupName, $event)"
+                     @dragleave="onGroupDragLeave(row.groupName)"
+                     @drop.prevent="onGroupDrop(row.groupName)"
+                     class="flex flex-wrap items-center justify-between gap-2">
                     <div class="flex items-center gap-2">
                         <button @click="toggleGroupCollapse(row.groupName)"
                                 class="rounded-lg border border-slate-200 bg-white/80 px-2 py-1 text-xs font-bold text-slate-600 dark:border-slate-700 dark:bg-slate-900/70 dark:text-slate-300">
@@ -133,11 +164,14 @@ window.CommandsTabTemplate = `
                     </div>
                 </div>
 
-                <div :class="row.isGroup ? 'mt-3 space-y-3' : 'space-y-3'" v-show="!row.isGroup || !isGroupCollapsed(row.groupName)">
+                <div :class="row.isGroup ? 'mt-2 space-y-2' : 'space-y-2'" v-show="!row.isGroup || !isGroupCollapsed(row.groupName)">
                     <div v-for="cmd in row.commands" :key="cmd.id"
-                         :class="['rounded-[26px] border p-5 transition-all shadow-[0_18px_40px_-36px_rgba(15,23,42,0.8)]',
+                         draggable="true"
+                         @dragstart="beginGroupDrag(cmd.id, $event)"
+                         @dragend="clearGroupDragState"
+                         :class="['rounded-xl border p-3 transition-all shadow-sm',
                                   cmd.enabled
-                                  ? 'bg-[linear-gradient(145deg,rgba(255,255,255,0.98),rgba(241,245,249,0.94))] border-slate-200/80 hover:-translate-y-0.5 hover:shadow-[0_24px_50px_-38px_rgba(15,23,42,0.7)] dark:bg-[linear-gradient(145deg,rgba(15,23,42,0.96),rgba(30,41,59,0.92))] dark:border-slate-700/70'
+                                  ? 'bg-[linear-gradient(145deg,rgba(255,255,255,0.98),rgba(241,245,249,0.94))] border-slate-200/80 hover:-translate-y-0.5 hover:shadow-md dark:bg-[linear-gradient(145deg,rgba(15,23,42,0.96),rgba(30,41,59,0.92))] dark:border-slate-700/70'
                                   : 'bg-slate-100/85 dark:bg-slate-900 border-slate-200 dark:border-slate-700 opacity-70']">
                         <div class="flex items-start justify-between">
                             <div class="flex-1 min-w-0">
@@ -148,10 +182,10 @@ window.CommandsTabTemplate = `
                                                @change="toggleCommandSelection(cmd.id)"
                                                class="h-4 w-4 rounded border-slate-300 text-sky-600 focus:ring-sky-500">
                                     </label>
-                                    <span class="inline-flex h-8 min-w-8 items-center justify-center rounded-2xl bg-slate-900 px-2 text-xs font-bold text-white dark:bg-slate-100 dark:text-slate-900">
+                                    <span class="inline-flex h-7 min-w-7 items-center justify-center rounded-xl bg-slate-900 px-2 text-[11px] font-bold text-white dark:bg-slate-100 dark:text-slate-900">
                                         {{ getCommandOrder(cmd.id) }}
                                     </span>
-                                    <span class="font-semibold dark:text-white text-lg">{{ cmd.name }}</span>
+                                    <span class="font-semibold dark:text-white text-base">{{ cmd.name }}</span>
                                     <span v-if="cmd.group_name"
                                           class="px-2 py-0.5 rounded-full text-xs font-medium bg-sky-100 dark:bg-sky-900/40 text-sky-700 dark:text-sky-300">
                                         组: {{ cmd.group_name }}
@@ -202,27 +236,27 @@ window.CommandsTabTemplate = `
 
                             <div class="flex flex-wrap items-center gap-2 ml-4">
                                 <button @click="moveCommand(cmd, -1)" :disabled="reordering || getCommandOrder(cmd.id) === 1"
-                                        class="rounded-xl border border-slate-200 bg-white/80 px-3 py-1.5 text-xs font-medium text-slate-600 transition hover:bg-slate-100 disabled:cursor-not-allowed disabled:opacity-40 dark:border-slate-700 dark:bg-slate-900/70 dark:text-slate-300 dark:hover:bg-slate-800">
+                                        class="rounded-lg border border-slate-200 bg-white/80 px-2.5 py-1 text-xs font-medium text-slate-600 transition hover:bg-slate-100 disabled:cursor-not-allowed disabled:opacity-40 dark:border-slate-700 dark:bg-slate-900/70 dark:text-slate-300 dark:hover:bg-slate-800">
                                     ↑ 上移
                                 </button>
                                 <button @click="moveCommand(cmd, 1)" :disabled="reordering || getCommandOrder(cmd.id) === commands.length"
-                                        class="rounded-xl border border-slate-200 bg-white/80 px-3 py-1.5 text-xs font-medium text-slate-600 transition hover:bg-slate-100 disabled:cursor-not-allowed disabled:opacity-40 dark:border-slate-700 dark:bg-slate-900/70 dark:text-slate-300 dark:hover:bg-slate-800">
+                                        class="rounded-lg border border-slate-200 bg-white/80 px-2.5 py-1 text-xs font-medium text-slate-600 transition hover:bg-slate-100 disabled:cursor-not-allowed disabled:opacity-40 dark:border-slate-700 dark:bg-slate-900/70 dark:text-slate-300 dark:hover:bg-slate-800">
                                     ↓ 下移
                                 </button>
                                 <button @click="testCommand(cmd)" title="手动执行"
-                                        class="rounded-xl bg-blue-500 px-3 py-1.5 text-xs font-semibold text-white transition hover:bg-blue-600">
+                                        class="rounded-lg bg-blue-500 px-2.5 py-1 text-xs font-semibold text-white transition hover:bg-blue-600">
                                     ▶️
                                 </button>
                                 <button @click="toggleCommand(cmd)" :title="cmd.enabled ? '禁用' : '启用'"
-                                        class="rounded-xl border border-slate-200 bg-white/80 px-3 py-1.5 text-xs font-medium text-slate-600 transition hover:bg-slate-100 dark:border-slate-700 dark:bg-slate-900/70 dark:text-slate-300 dark:hover:bg-slate-800">
+                                        class="rounded-lg border border-slate-200 bg-white/80 px-2.5 py-1 text-xs font-medium text-slate-600 transition hover:bg-slate-100 dark:border-slate-700 dark:bg-slate-900/70 dark:text-slate-300 dark:hover:bg-slate-800">
                                     {{ cmd.enabled ? '⏸️' : '▶️' }}
                                 </button>
                                 <button @click="openEditCommand(cmd)" title="编辑"
-                                        class="rounded-xl border border-slate-200 bg-white/80 px-3 py-1.5 text-xs font-medium text-slate-600 transition hover:bg-slate-100 dark:border-slate-700 dark:bg-slate-900/70 dark:text-slate-300 dark:hover:bg-slate-800">
+                                        class="rounded-lg border border-slate-200 bg-white/80 px-2.5 py-1 text-xs font-medium text-slate-600 transition hover:bg-slate-100 dark:border-slate-700 dark:bg-slate-900/70 dark:text-slate-300 dark:hover:bg-slate-800">
                                     ✏️
                                 </button>
                                 <button @click="deleteCommand(cmd)" title="删除"
-                                        class="rounded-xl border border-red-200 bg-red-50 px-3 py-1.5 text-xs font-medium text-red-500 transition hover:bg-red-100 dark:border-red-500/30 dark:bg-red-500/10 dark:text-red-300 dark:hover:bg-red-500/20">
+                                        class="rounded-lg border border-red-200 bg-red-50 px-2.5 py-1 text-xs font-medium text-red-500 transition hover:bg-red-100 dark:border-red-500/30 dark:bg-red-500/10 dark:text-red-300 dark:hover:bg-red-500/20">
                                     🗑️
                                 </button>
                             </div>
@@ -232,7 +266,7 @@ window.CommandsTabTemplate = `
             </div>
         </div>
         <!-- ========== 编辑弹窗 ========== -->
-        <div v-if="commands.length > 0" class="flex flex-col gap-3 rounded-2xl border border-slate-200/80 bg-white/85 p-4 shadow-sm dark:border-slate-700/70 dark:bg-slate-900/75 sm:flex-row sm:items-center sm:justify-between">
+        <div v-if="commands.length > 0" class="flex flex-col gap-2 rounded-xl border border-slate-200/80 bg-white/85 p-3 shadow-sm dark:border-slate-700/70 dark:bg-slate-900/75 sm:flex-row sm:items-center sm:justify-between">
             <div class="text-sm text-slate-500 dark:text-slate-400">
                 第<span class="font-semibold text-slate-900 dark:text-white">{{ currentPage }}</span> / {{ totalPages }} 页            </div>
             <div class="flex flex-wrap items-center gap-2">
@@ -414,6 +448,46 @@ window.CommandsTabTemplate = `
                                 {{ editingCommand.trigger.match_mode === 'regex'
                                     ? '正则内容在上方“正则表达式”输入框填写。例如：.*/queue/join.*'
                                     : '关键词模式同样在上方输入框填写，支持 URL 子串匹配。' }}
+                            </p>
+                        </div>
+
+                        <div class="mt-3 rounded-xl border border-slate-200/70 bg-white/80 p-3 dark:border-slate-700/60 dark:bg-slate-900/40">
+                            <div class="grid grid-cols-1 gap-3 md:grid-cols-4">
+                                <label class="flex items-center gap-2 text-sm dark:text-gray-300 pt-5 md:pt-6">
+                                    <input type="checkbox" v-model="editingCommand.trigger.periodic_enabled" class="rounded">
+                                    启用该命令周期检测
+                                </label>
+                                <div>
+                                    <label class="block text-xs text-gray-500 dark:text-gray-400 mb-1">命令优先级（1-4）</label>
+                                    <input v-model.number="editingCommand.trigger.priority"
+                                           type="number"
+                                           min="1"
+                                           max="4"
+                                           step="1"
+                                           class="w-full px-2 py-1.5 border dark:border-gray-600 rounded bg-white dark:bg-gray-700 dark:text-white text-sm">
+                                </div>
+                                <div>
+                                    <label class="block text-xs text-gray-500 dark:text-gray-400 mb-1">检测间隔（秒）</label>
+                                    <input v-model.number="editingCommand.trigger.periodic_interval_sec"
+                                           type="number"
+                                           min="1"
+                                           step="0.5"
+                                           class="w-full px-2 py-1.5 border dark:border-gray-600 rounded bg-white dark:bg-gray-700 dark:text-white text-sm">
+                                </div>
+                                <div>
+                                    <label class="block text-xs text-gray-500 dark:text-gray-400 mb-1">随机抖动（秒）</label>
+                                    <input v-model.number="editingCommand.trigger.periodic_jitter_sec"
+                                           type="number"
+                                           min="0"
+                                           step="0.2"
+                                           class="w-full px-2 py-1.5 border dark:border-gray-600 rounded bg-white dark:bg-gray-700 dark:text-white text-sm">
+                                </div>
+                            </div>
+                            <p class="mt-2 text-xs text-slate-500 dark:text-slate-400">
+                                仅影响“空闲标签页周期扫描”；对话完成后的即时触发检查仍会执行。
+                            </p>
+                            <p class="mt-1 text-xs text-slate-500 dark:text-slate-400">
+                                优先级 1-4，数值越大越高。默认请求基准优先级为 2（可用环境变量 <code>CMD_REQUEST_PRIORITY_BASELINE</code> 调整）。
                             </p>
                         </div>
 

@@ -50,7 +50,8 @@ class CommandCreateRequest(BaseModel):
         "match_mode": "keyword",
         "status_codes": "403,429,500,502,503,504",
         "abort_on_match": True,
-        "scope": "all", "domain": "", "tab_index": None
+        "scope": "all", "domain": "", "tab_index": None,
+        "priority": 2
     })
     actions: list = Field(default_factory=lambda: [
         {"type": "clear_cookies"},
@@ -180,38 +181,75 @@ async def delete_command(command_id: str, authenticated: bool = Depends(verify_a
 
 @router.post("/api/commands/{command_id}/test")
 async def test_command(command_id: str, authenticated: bool = Depends(verify_auth)):
-    """手动触发命令（在第一个空闲标签页上执行）"""
+    """Manual trigger command test on all idle tabs that match command scope."""
     cmd = command_engine.get_command(command_id)
     if not cmd:
-        raise HTTPException(status_code=404, detail="命令不存在")
+        raise HTTPException(status_code=404, detail="command_not_found")
 
     try:
         from app.core.browser import get_browser
+
         browser = get_browser(auto_connect=False)
         pool = browser.tab_pool
 
         status = pool.get_status()
-        idle_tabs = [t for t in status.get("tabs", []) if t["status"] == "idle"]
+        idle_tabs = [t for t in status.get("tabs", []) if t.get("status") == "idle"]
+        idle_tabs.sort(key=lambda t: t.get("persistent_index", 0))
 
         if not idle_tabs:
-            raise HTTPException(status_code=409, detail="没有空闲标签页可用于测试")
+            raise HTTPException(status_code=409, detail="no_idle_tabs")
 
-        tab_index = idle_tabs[0]["persistent_index"]
-        session = pool.acquire_by_index(tab_index, f"cmd_test_{command_id}", timeout=5)
+        executed_tabs: List[int] = []
+        skipped_tabs: List[int] = []
+        failed_tabs: List[dict] = []
 
-        if not session:
-            raise HTTPException(status_code=409, detail="获取标签页失败")
+        for tab_info in idle_tabs:
+            tab_index = tab_info.get("persistent_index")
+            if tab_index is None:
+                continue
 
-        try:
-            command_engine._execute_command(cmd, session)
-            return {"success": True, "message": f"命令已在标签页 #{tab_index} 上执行"}
-        finally:
-            pool.release(session.id, check_triggers=False)
+            session = pool.acquire_by_index(tab_index, f"cmd_test_{command_id}_{tab_index}", timeout=3)
+            if not session:
+                failed_tabs.append({"tab_index": tab_index, "error": "acquire_failed"})
+                continue
+
+            try:
+                # Respect command scope even in manual test mode.
+                if not command_engine._matches_scope(cmd, session):
+                    skipped_tabs.append(tab_index)
+                    continue
+
+                command_engine._execute_command(cmd, session)
+                executed_tabs.append(tab_index)
+            except Exception as e:
+                failed_tabs.append({"tab_index": tab_index, "error": str(e)})
+            finally:
+                pool.release(session.id, check_triggers=False)
+
+        if not executed_tabs:
+            if skipped_tabs and not failed_tabs:
+                raise HTTPException(
+                    status_code=409,
+                    detail=f"no_idle_tabs_match_scope, skipped={skipped_tabs}",
+                )
+            raise HTTPException(
+                status_code=500,
+                detail=f"command_test_failed, failed={failed_tabs}, skipped={skipped_tabs}",
+            )
+
+        return {
+            "success": True,
+            "message": f"command executed on tabs: {executed_tabs}",
+            "executed_tabs": executed_tabs,
+            "skipped_tabs": skipped_tabs,
+            "failed_tabs": failed_tabs,
+            "executed_count": len(executed_tabs),
+        }
 
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"手动触发失败: {e}")
+        logger.error(f"manual command test failed: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 

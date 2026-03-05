@@ -10,7 +10,11 @@
         "scope": "domain",
         "domain": "arena.ai",
         "tab_index": null,
-        "command_id": ""
+        "command_id": "",
+        "priority": 3,
+        "periodic_enabled": true,
+        "periodic_interval_sec": 8.0,
+        "periodic_jitter_sec": 2.0
       },
       "actions": [
         {
@@ -40,8 +44,8 @@
       "script": "",
       "script_lang": "javascript",
       "id": "cmd_58625812",
-      "last_triggered": 1772620928.2850287,
-      "trigger_count": 20,
+      "last_triggered": 1772704260.030908,
+      "trigger_count": 34,
       "group_name": "命令组1"
     },
     {
@@ -61,13 +65,17 @@
         "command_id": "",
         "action_ref": "",
         "match_rule": "equals",
-        "expected_value": ""
+        "expected_value": "",
+        "priority": 4,
+        "periodic_enabled": true,
+        "periodic_interval_sec": 8.0,
+        "periodic_jitter_sec": 2.0
       },
       "actions": [
         {
           "type": "release_tab_lock",
           "reason": "network_error_unlock",
-          "clear_page": true,
+          "clear_page": false,
           "stop_actions": false,
           "action_id": "step_1_unlock"
         },
@@ -136,7 +144,11 @@
         "command_id": "cmd_58625812",
         "action_ref": "step_5_probe",
         "match_rule": "equals",
-        "expected_value": "READY"
+        "expected_value": "READY",
+        "priority": 3,
+        "periodic_enabled": false,
+        "periodic_interval_sec": 8.0,
+        "periodic_jitter_sec": 2.0
       },
       "actions": [
         {
@@ -149,8 +161,8 @@
       "script": "",
       "script_lang": "javascript",
       "id": "cmd_aab3f583",
-      "last_triggered": 1772621478.09017,
-      "trigger_count": 26,
+      "last_triggered": 1772699908.392711,
+      "trigger_count": 30,
       "group_name": "命令组1"
     },
     {
@@ -163,7 +175,10 @@
         "scope": "all",
         "domain": "",
         "tab_index": null,
-        "command_id": ""
+        "command_id": "",
+        "periodic_enabled": true,
+        "periodic_interval_sec": 8.0,
+        "periodic_jitter_sec": 2.0
       },
       "actions": [
         {
@@ -198,7 +213,11 @@
         "expected_value": "BLACK",
         "match_mode": "keyword",
         "status_codes": "403,429,500,502,503,504",
-        "abort_on_match": true
+        "abort_on_match": true,
+        "priority": 4,
+        "periodic_enabled": false,
+        "periodic_interval_sec": 8.0,
+        "periodic_jitter_sec": 2.0
       },
       "actions": [
         {
@@ -250,7 +269,11 @@
         "expected_value": "VERIFY",
         "match_mode": "keyword",
         "status_codes": "403,429,500,502,503,504",
-        "abort_on_match": true
+        "abort_on_match": true,
+        "priority": 4,
+        "periodic_enabled": false,
+        "periodic_interval_sec": 8.0,
+        "periodic_jitter_sec": 2.0
       },
       "actions": [
         {
@@ -290,7 +313,11 @@
         "command_id": "cmd_9b1e4a01",
         "action_ref": "step_5_probe",
         "match_rule": "equals",
-        "expected_value": "READY"
+        "expected_value": "READY",
+        "priority": 3,
+        "periodic_enabled": false,
+        "periodic_interval_sec": 8.0,
+        "periodic_jitter_sec": 2.0
       },
       "actions": [
         {
@@ -306,6 +333,45 @@
       "group_name": "命令组1"
     },
     {
+      "name": "切换模型下2",
+      "enabled": true,
+      "mode": "simple",
+      "trigger": {
+        "type": "page_check",
+        "value": "Battle Mode",
+        "command_id": "",
+        "action_ref": "",
+        "match_rule": "equals",
+        "expected_value": "",
+        "match_mode": "keyword",
+        "status_codes": "403,429,500,502,503,504",
+        "abort_on_match": true,
+        "scope": "domain",
+        "domain": "arena.ai",
+        "tab_index": null,
+        "priority": 3,
+        "periodic_enabled": true,
+        "periodic_interval_sec": 8.0,
+        "periodic_jitter_sec": 2.0,
+        "fire_mode": "level",
+        "cooldown_sec": 8.0
+      },
+      "actions": [
+        {
+          "type": "execute_workflow",
+          "action_id": "step_2",
+          "preset_name": "选择模型",
+          "prompt": ""
+        }
+      ],
+      "group_name": "命令组1",
+      "script": "",
+      "script_lang": "javascript",
+      "id": "cmd_69640733",
+      "last_triggered": 1772704265.5062654,
+      "trigger_count": 1451
+    },
+    {
       "name": "验证恢复后切换模型",
       "enabled": true,
       "mode": "simple",
@@ -318,7 +384,11 @@
         "command_id": "cmd_9b1e4a02",
         "action_ref": "step_3_probe",
         "match_rule": "equals",
-        "expected_value": "READY"
+        "expected_value": "READY",
+        "priority": 3,
+        "periodic_enabled": false,
+        "periodic_interval_sec": 8.0,
+        "periodic_jitter_sec": 2.0
       },
       "actions": [
         {
@@ -346,7 +416,11 @@
         "command_id": "cmd_b34a8efd",
         "action_ref": "step_10_probe",
         "match_rule": "equals",
-        "expected_value": "READY"
+        "expected_value": "READY",
+        "priority": 3,
+        "periodic_enabled": false,
+        "periodic_interval_sec": 8.0,
+        "periodic_jitter_sec": 2.0
       },
       "actions": [
         {
@@ -360,6 +434,147 @@
       "script_lang": "javascript",
       "id": "cmd_9b1e4a05",
       "group_name": "命令组1"
+    },
+    {
+      "id": "cmd_cfvis001",
+      "name": "CF_VISUAL_SCAN_EACH_REQUEST",
+      "enabled": false,
+      "mode": "simple",
+      "trigger": {
+        "type": "request_count",
+        "value": 1,
+        "command_id": "",
+        "action_ref": "",
+        "match_rule": "equals",
+        "expected_value": "",
+        "match_mode": "keyword",
+        "status_codes": "403,429,500,502,503,504",
+        "abort_on_match": true,
+        "scope": "all",
+        "domain": "",
+        "tab_index": null,
+        "periodic_enabled": true,
+        "periodic_interval_sec": 8.0,
+        "periodic_jitter_sec": 2.0
+      },
+      "actions": [
+        {
+          "type": "run_js",
+          "action_id": "step_1",
+          "code": "(() => {\n  const keyword = \"cf_mock_20260304\";\n  const html = (document.documentElement?.outerHTML || '').toLowerCase();\n  const matched = html.includes(keyword.toLowerCase());\n  (() => {\n  const ok = !!(matched);\n  const title = (matched ? 'CF KEYWORD MATCHED' : 'CF KEYWORD MISSED');\n  const detail = ('keyword=' + keyword);\n  const id = 'cf-test-toast-center';\n  let el = document.getElementById(id);\n  if (!el) {\n    el = document.createElement('div');\n    el.id = id;\n    el.style.cssText = [\n      'position:fixed',\n      'left:50%',\n      'top:50%',\n      'transform:translate(-50%,-50%)',\n      'z-index:2147483647',\n      'min-width:420px',\n      'max-width:82vw',\n      'padding:16px 18px',\n      'border-radius:12px',\n      'box-shadow:0 18px 40px rgba(0,0,0,.38)',\n      'font:14px/1.45 ui-monospace,Consolas,monospace',\n      'color:#fff'\n    ].join(';');\n    document.body.appendChild(el);\n  }\n  el.style.background = ok ? '#166534' : '#991b1b';\n  const now = new Date().toLocaleTimeString();\n  el.innerHTML = `\n    <div style=\"font-size:18px;font-weight:700;margin-bottom:6px;\">${title}</div>\n    <div style=\"font-size:12px;opacity:.95;word-break:break-word;\">${detail}</div>\n    <div style=\"font-size:12px;opacity:.9;margin-top:4px;\">time=${now}</div>\n  `;\n  if (window.__cfTestToastTimer) clearTimeout(window.__cfTestToastTimer);\n  window.__cfTestToastTimer = setTimeout(() => {\n    const box = document.getElementById(id);\n    if (box && box.parentNode) box.parentNode.removeChild(box);\n  }, 10000);\n})();\n  localStorage.setItem('cf_visual_check_last', JSON.stringify({ matched, keyword, time: new Date().toISOString() }));\n})();"
+        }
+      ],
+      "group_name": "CF_TEST_SUITE",
+      "script": "",
+      "script_lang": "javascript",
+      "last_triggered": 1772639532.8743486,
+      "trigger_count": 3
+    },
+    {
+      "id": "cmd_cftpg001",
+      "name": "CF_PAGECHECK_TRIGGER_POPUP",
+      "enabled": false,
+      "mode": "simple",
+      "trigger": {
+        "type": "page_check",
+        "value": "cf_mock_20260304",
+        "command_id": "",
+        "action_ref": "",
+        "match_rule": "equals",
+        "expected_value": "",
+        "match_mode": "keyword",
+        "status_codes": "403,429,500,502,503,504",
+        "abort_on_match": true,
+        "scope": "all",
+        "domain": "",
+        "tab_index": null,
+        "periodic_enabled": true,
+        "periodic_interval_sec": 8.0,
+        "periodic_jitter_sec": 2.0
+      },
+      "actions": [
+        {
+          "type": "run_js",
+          "action_id": "step_1",
+          "code": "(() => {\n  const ok = !!(true);\n  const title = ('PAGE_CHECK TRIGGERED');\n  const detail = (\"keyword=cf_mock_20260304\");\n  const id = 'cf-test-toast-center';\n  let el = document.getElementById(id);\n  if (!el) {\n    el = document.createElement('div');\n    el.id = id;\n    el.style.cssText = [\n      'position:fixed',\n      'left:50%',\n      'top:50%',\n      'transform:translate(-50%,-50%)',\n      'z-index:2147483647',\n      'min-width:420px',\n      'max-width:82vw',\n      'padding:16px 18px',\n      'border-radius:12px',\n      'box-shadow:0 18px 40px rgba(0,0,0,.38)',\n      'font:14px/1.45 ui-monospace,Consolas,monospace',\n      'color:#fff'\n    ].join(';');\n    document.body.appendChild(el);\n  }\n  el.style.background = ok ? '#166534' : '#991b1b';\n  const now = new Date().toLocaleTimeString();\n  el.innerHTML = `\n    <div style=\"font-size:18px;font-weight:700;margin-bottom:6px;\">${title}</div>\n    <div style=\"font-size:12px;opacity:.95;word-break:break-word;\">${detail}</div>\n    <div style=\"font-size:12px;opacity:.9;margin-top:4px;\">time=${now}</div>\n  `;\n  if (window.__cfTestToastTimer) clearTimeout(window.__cfTestToastTimer);\n  window.__cfTestToastTimer = setTimeout(() => {\n    const box = document.getElementById(id);\n    if (box && box.parentNode) box.parentNode.removeChild(box);\n  }, 10000);\n})();"
+        }
+      ],
+      "group_name": "CF_TEST_SUITE",
+      "script": "",
+      "script_lang": "javascript",
+      "last_triggered": 1772641169.7087088,
+      "trigger_count": 39
+    },
+    {
+      "id": "cmd_cftnt001",
+      "name": "CF_NETWORK_429_TRIGGER_POPUP",
+      "enabled": false,
+      "mode": "simple",
+      "trigger": {
+        "type": "network_request_error",
+        "value": "httpstat.us/429",
+        "command_id": "",
+        "action_ref": "",
+        "match_rule": "equals",
+        "expected_value": "",
+        "match_mode": "keyword",
+        "status_codes": "429",
+        "abort_on_match": false,
+        "scope": "all",
+        "domain": "",
+        "tab_index": null,
+        "url_pattern": "httpstat.us/429",
+        "periodic_enabled": true,
+        "periodic_interval_sec": 8.0,
+        "periodic_jitter_sec": 2.0
+      },
+      "actions": [
+        {
+          "type": "run_js",
+          "action_id": "step_1",
+          "code": "(() => {\n  const ok = !!(true);\n  const title = ('NETWORK 429 TRIGGERED');\n  const detail = ('url_pattern=httpstat.us/429 status=429');\n  const id = 'cf-test-toast-center';\n  let el = document.getElementById(id);\n  if (!el) {\n    el = document.createElement('div');\n    el.id = id;\n    el.style.cssText = [\n      'position:fixed',\n      'left:50%',\n      'top:50%',\n      'transform:translate(-50%,-50%)',\n      'z-index:2147483647',\n      'min-width:420px',\n      'max-width:82vw',\n      'padding:16px 18px',\n      'border-radius:12px',\n      'box-shadow:0 18px 40px rgba(0,0,0,.38)',\n      'font:14px/1.45 ui-monospace,Consolas,monospace',\n      'color:#fff'\n    ].join(';');\n    document.body.appendChild(el);\n  }\n  el.style.background = ok ? '#166534' : '#991b1b';\n  const now = new Date().toLocaleTimeString();\n  el.innerHTML = `\n    <div style=\"font-size:18px;font-weight:700;margin-bottom:6px;\">${title}</div>\n    <div style=\"font-size:12px;opacity:.95;word-break:break-word;\">${detail}</div>\n    <div style=\"font-size:12px;opacity:.9;margin-top:4px;\">time=${now}</div>\n  `;\n  if (window.__cfTestToastTimer) clearTimeout(window.__cfTestToastTimer);\n  window.__cfTestToastTimer = setTimeout(() => {\n    const box = document.getElementById(id);\n    if (box && box.parentNode) box.parentNode.removeChild(box);\n  }, 10000);\n})();"
+        }
+      ],
+      "group_name": "CF_TEST_SUITE",
+      "script": "",
+      "script_lang": "javascript",
+      "last_triggered": 1772639578.8383894,
+      "trigger_count": 1
+    },
+    {
+      "id": "cmd_cftmj001",
+      "name": "CF_MOCK_INJECTOR_MANUAL",
+      "enabled": false,
+      "mode": "simple",
+      "trigger": {
+        "type": "request_count",
+        "value": 999999,
+        "command_id": "",
+        "action_ref": "",
+        "match_rule": "equals",
+        "expected_value": "",
+        "match_mode": "keyword",
+        "status_codes": "403,429,500,502,503,504",
+        "abort_on_match": true,
+        "scope": "all",
+        "domain": "",
+        "tab_index": null,
+        "periodic_enabled": true,
+        "periodic_interval_sec": 8.0,
+        "periodic_jitter_sec": 2.0
+      },
+      "actions": [
+        {
+          "type": "run_js",
+          "action_id": "step_1",
+          "code": "(() => {\n  const id = 'cf-mock-banner';\n  const prev = document.getElementById(id);\n  if (prev) prev.remove();\n  const div = document.createElement('div');\n  div.id = id;\n  div.style.cssText = 'position:fixed;left:12px;top:12px;z-index:2147483646;background:#111827;color:#fff;padding:8px 12px;border-radius:8px;font:14px monospace';\n  div.textContent = 'Cloudflare challenge cf_mock_20260304';\n  document.body.appendChild(div);\n  (() => {\n  const ok = !!(true);\n  const title = ('MOCK BANNER INJECTED');\n  const detail = (\"keyword=cf_mock_20260304\");\n  const id = 'cf-test-toast-center';\n  let el = document.getElementById(id);\n  if (!el) {\n    el = document.createElement('div');\n    el.id = id;\n    el.style.cssText = [\n      'position:fixed',\n      'left:50%',\n      'top:50%',\n      'transform:translate(-50%,-50%)',\n      'z-index:2147483647',\n      'min-width:420px',\n      'max-width:82vw',\n      'padding:16px 18px',\n      'border-radius:12px',\n      'box-shadow:0 18px 40px rgba(0,0,0,.38)',\n      'font:14px/1.45 ui-monospace,Consolas,monospace',\n      'color:#fff'\n    ].join(';');\n    document.body.appendChild(el);\n  }\n  el.style.background = ok ? '#166534' : '#991b1b';\n  const now = new Date().toLocaleTimeString();\n  el.innerHTML = `\n    <div style=\"font-size:18px;font-weight:700;margin-bottom:6px;\">${title}</div>\n    <div style=\"font-size:12px;opacity:.95;word-break:break-word;\">${detail}</div>\n    <div style=\"font-size:12px;opacity:.9;margin-top:4px;\">time=${now}</div>\n  `;\n  if (window.__cfTestToastTimer) clearTimeout(window.__cfTestToastTimer);\n  window.__cfTestToastTimer = setTimeout(() => {\n    const box = document.getElementById(id);\n    if (box && box.parentNode) box.parentNode.removeChild(box);\n  }, 10000);\n})();\n})();"
+        }
+      ],
+      "group_name": "CF_TEST_SUITE",
+      "script": "",
+      "script_lang": "javascript",
+      "last_triggered": 1772639508.7934961,
+      "trigger_count": 2
     }
   ]
 }

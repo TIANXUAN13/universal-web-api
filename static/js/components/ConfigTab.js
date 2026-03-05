@@ -24,6 +24,7 @@ window.ConfigTab = {
         return {
             // 🆕 预设管理
             selectedPreset: '主预设',
+            defaultPreset: '主预设',
             availablePresets: [],
             presetLoading: false,
             newPresetName: '',
@@ -32,11 +33,12 @@ window.ConfigTab = {
             showRenamePresetInput: false,
 
             // 折叠状态
-            selectorCollapsed: false,
-            workflowCollapsed: false,
-            imageConfigCollapsed: false,
-            streamConfigCollapsed: false,
-            filePasteCollapsed: false,
+            selectorCollapsed: true,
+            extractorCollapsed: true,
+            workflowCollapsed: true,
+            imageConfigCollapsed: true,
+            streamConfigCollapsed: true,
+            filePasteCollapsed: true,
 
             // 默认配置
             defaultImageConfig: {
@@ -66,7 +68,11 @@ window.ConfigTab = {
             if (!this.currentConfig) return null;
             const presets = this.currentConfig.presets;
             if (!presets) return this.currentConfig; // 兼容旧格式
-            return presets[this.selectedPreset] || presets['主预设'] || Object.values(presets)[0] || null;
+            return presets[this.selectedPreset]
+                || presets[this.defaultPreset]
+                || presets['主预设']
+                || Object.values(presets)[0]
+                || null;
         },
         imageConfig() {
             if (!this.presetConfig) return this.defaultImageConfig;
@@ -116,16 +122,26 @@ window.ConfigTab = {
                 if (response.ok) {
                     const data = await response.json();
                     this.availablePresets = data.presets || ['主预设'];
+                    const apiDefault = data.default_preset;
+                    if (apiDefault && this.availablePresets.includes(apiDefault)) {
+                        this.defaultPreset = apiDefault;
+                    } else if (this.availablePresets.includes('主预设')) {
+                        this.defaultPreset = '主预设';
+                    } else {
+                        this.defaultPreset = this.availablePresets[0] || '主预设';
+                    }
                 } else {
                     this.availablePresets = ['主预设'];
+                    this.defaultPreset = '主预设';
                 }
                 // 确保选中的预设仍然有效
                 if (!this.availablePresets.includes(this.selectedPreset)) {
-                    this.selectedPreset = this.availablePresets[0] || '主预设';
+                    this.selectedPreset = this.defaultPreset || this.availablePresets[0] || '主预设';
                 }
             } catch (e) {
                 console.error('加载预设列表失败:', e);
                 this.availablePresets = ['主预设'];
+                this.defaultPreset = '主预设';
             } finally {
                 this.presetLoading = false;
             }
@@ -135,6 +151,30 @@ window.ConfigTab = {
             this.selectedPreset = presetName;
             // 触发父组件重新加载该预设的配置
             this.$emit('reload-config');
+        },
+
+        async setDefaultPreset() {
+            if (!this.currentDomain || !this.selectedPreset) return;
+            try {
+                const response = await fetch('/api/presets/' + encodeURIComponent(this.currentDomain) + '/default', {
+                    method: 'PUT',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        preset_name: this.selectedPreset
+                    })
+                });
+
+                if (response.ok) {
+                    this.defaultPreset = this.selectedPreset;
+                    this.$emit('reload-config');
+                    alert('✅ 默认预设已设置为 "' + this.selectedPreset + '"');
+                } else {
+                    const err = await response.json();
+                    alert('❌ 设置默认预设失败: ' + (err.detail || '未知错误'));
+                }
+            } catch (e) {
+                alert('❌ 网络错误: ' + e.message);
+            }
         },
 
         async createPreset() {
@@ -223,7 +263,7 @@ window.ConfigTab = {
 
                 if (response.ok) {
                     await this.loadPresets();
-                    this.selectedPreset = this.availablePresets[0] || '主预设';
+                    this.selectedPreset = this.defaultPreset || this.availablePresets[0] || '主预设';
                     this.$emit('reload-config');
                     alert('✅ 预设已删除');
                 } else {
@@ -239,7 +279,9 @@ window.ConfigTab = {
         currentDomain: {
             handler(newDomain) {
                 if (newDomain) {
-                    this.selectedPreset = '主预设';
+                    // 切换站点时强制按站点默认预设初始化
+                    this.selectedPreset = '';
+                    this.defaultPreset = '主预设';
                     this.showNewPresetInput = false;
                     this.showRenamePresetInput = false;
                     this.newPresetName = '';
@@ -248,6 +290,7 @@ window.ConfigTab = {
                 } else {
                     this.availablePresets = [];
                     this.selectedPreset = '主预设';
+                    this.defaultPreset = '主预设';
                     this.showNewPresetInput = false;
                     this.showRenamePresetInput = false;
                     this.newPresetName = '';
@@ -284,9 +327,19 @@ window.ConfigTab = {
                             <span class="text-xs text-gray-400 dark:text-gray-500">
                                 ({{ availablePresets.length }} 个预设)
                             </span>
+                            <span class="text-xs px-2 py-0.5 rounded bg-emerald-50 dark:bg-emerald-900/30 text-emerald-700 dark:text-emerald-300 border border-emerald-200 dark:border-emerald-800">
+                                默认: {{ defaultPreset || '主预设' }}
+                            </span>
                         </div>
 
                         <div class="flex items-center gap-2">
+                            <!-- 设为默认 -->
+                            <button @click="setDefaultPreset"
+                                    :disabled="!selectedPreset || selectedPreset === defaultPreset"
+                                    class="px-3 py-1 text-xs font-medium text-emerald-700 dark:text-emerald-300 border border-emerald-300 dark:border-emerald-700 rounded hover:bg-emerald-50 dark:hover:bg-emerald-900/30 disabled:opacity-30">
+                                ⭐ 设为默认
+                            </button>
+
                             <!-- 新建预设 -->
                             <div v-if="showNewPresetInput" class="flex items-center gap-2">
                                 <input v-model="newPresetName"
@@ -344,7 +397,7 @@ window.ConfigTab = {
                         </div>
                     </div>
                     <p class="text-xs text-gray-400 dark:text-gray-500 mt-2">
-                        新建预设会克隆当前选中的预设配置。在标签页池中可为不同标签页选择不同预设。
+                        新建预设会克隆当前选中的预设配置。在标签页池中可为不同标签页选择不同预设。未手动指定时会自动使用“默认预设”。
                     </p>
                 </div>
 
@@ -364,6 +417,8 @@ window.ConfigTab = {
                 <extractor-panel v-if="presetConfig"
                     :extractor-id="presetConfig.extractor_id"
                     :extractor-verified="presetConfig.extractor_verified"
+                    :collapsed="extractorCollapsed"
+                    @update:collapsed="extractorCollapsed = $event"
                 />
 
                 <!-- 图片配置面板 -->

@@ -412,7 +412,8 @@ class BrowserCore:
         self, 
         messages: List[Dict],
         stream: bool = True,
-        task_id: str = None
+        task_id: str = None,
+        stop_checker: Optional[Callable[[], bool]] = None
     ) -> Generator[str, None, None]:
         """
         工作流执行入口（v2.0 改进版）
@@ -452,21 +453,35 @@ class BrowserCore:
             
             # 执行工作流
             if stream:
-                yield from self._execute_workflow_stream(session, sanitized_messages)
+                yield from self._execute_workflow_stream(
+                    session,
+                    sanitized_messages,
+                    stop_checker=stop_checker,
+                )
             else:
-                yield from self._execute_workflow_non_stream(session, sanitized_messages)
+                yield from self._execute_workflow_non_stream(
+                    session,
+                    sanitized_messages,
+                    stop_checker=stop_checker,
+                )
         
         finally:
             # 释放标签页
             if session:
-                self.tab_pool.release(session.id)
+                cancelled = bool(stop_checker and stop_checker())
+                self.tab_pool.release(
+                    session.id,
+                    check_triggers=not cancelled,
+                    rollback_request_count=cancelled,
+                )
 
     def execute_workflow_for_tab_index(
         self, 
         tab_index: int,
         messages: List[Dict],
         stream: bool = True,
-        task_id: str = None
+        task_id: str = None,
+        stop_checker: Optional[Callable[[], bool]] = None
     ) -> Generator[str, None, None]:
         """
         使用指定编号的标签页执行工作流
@@ -508,25 +523,40 @@ class BrowserCore:
             
             # 执行工作流
             if stream:
-                yield from self._execute_workflow_stream(session, sanitized_messages)
+                yield from self._execute_workflow_stream(
+                    session,
+                    sanitized_messages,
+                    stop_checker=stop_checker,
+                )
             else:
-                yield from self._execute_workflow_non_stream(session, sanitized_messages)
+                yield from self._execute_workflow_non_stream(
+                    session,
+                    sanitized_messages,
+                    stop_checker=stop_checker,
+                )
         
         finally:
             if session:
-                self.tab_pool.release(session.id)
+                cancelled = bool(stop_checker and stop_checker())
+                self.tab_pool.release(
+                    session.id,
+                    check_triggers=not cancelled,
+                    rollback_request_count=cancelled,
+                )
    
     def _execute_workflow_stream(
         self, 
         session: TabSession,
         messages: List[Dict],
-        preset_name: Optional[str] = None
+        preset_name: Optional[str] = None,
+        stop_checker: Optional[Callable[[], bool]] = None
     ) -> Generator[str, None, None]:
         """流式工作流执行（v2.0）"""
     
         tab = session.tab
+        effective_stop_checker = stop_checker or self._should_stop_checker
     
-        if self._should_stop_checker():
+        if effective_stop_checker():
             yield self.formatter.pack_error("请求已取消", code="cancelled")
             yield self.formatter.pack_finish()
             return
@@ -689,7 +719,7 @@ class BrowserCore:
         executor = WorkflowExecutor(
             tab=tab,
             stealth_mode=stealth_mode,
-            should_stop_checker=self._should_stop_checker,
+            should_stop_checker=effective_stop_checker,
             extractor=extractor,
             image_config=image_config,
             stream_config=stream_config,
@@ -702,7 +732,7 @@ class BrowserCore:
         try:
             
             for step in workflow:
-                if self._should_stop_checker():
+                if effective_stop_checker():
                     logger.info(f"[{session.id}] 工作流被用户中断")
                     break
                 
@@ -746,8 +776,8 @@ class BrowserCore:
                         break
             
             # 图片提取
-            logger.debug(f"[PROBE] Workflow 循环结束，image_enabled={image_extraction_enabled}, should_stop={self._should_stop_checker()}")
-            if image_extraction_enabled and not self._should_stop_checker():
+            logger.debug(f"[PROBE] Workflow 循环结束，image_enabled={image_extraction_enabled}, should_stop={effective_stop_checker()}")
+            if image_extraction_enabled and not effective_stop_checker():
                 logger.debug("[PROBE] 进入图片提取分支")
                 try:
                     images = self._extract_images_after_stream(
@@ -755,7 +785,8 @@ class BrowserCore:
                         extractor=extractor,
                         image_config=image_config,
                         result_selector=result_container_selector,
-                        completion_id=executor._completion_id
+                        completion_id=executor._completion_id,
+                        stop_checker=effective_stop_checker
                     )
                     
                     if images:
@@ -793,18 +824,20 @@ class BrowserCore:
         extractor,
         image_config: Dict,
         result_selector: str,
-        completion_id: str = None
+        completion_id: str = None,
+        stop_checker: Optional[Callable[[], bool]] = None
     ) -> List[Dict]:
         """流式输出结束后提取图片"""
         from app.core.elements import ElementFinder
         from app.core.extractors.image_extractor import image_extractor
         
         debounce = image_config.get("debounce_seconds", 2.0)
+        effective_stop_checker = stop_checker or self._should_stop_checker
         if debounce > 0:
             elapsed = 0
             step = 0.1
             while elapsed < debounce:
-                if self._should_stop_checker():
+                if effective_stop_checker():
                     return []
                 time.sleep(step)
                 elapsed += step
@@ -986,13 +1019,19 @@ class BrowserCore:
         self, 
         session: TabSession,
         messages: List[Dict],
-        preset_name: Optional[str] = None
+        preset_name: Optional[str] = None,
+        stop_checker: Optional[Callable[[], bool]] = None
     ) -> Generator[str, None, None]:
         """非流式工作流执行"""
         collected_content = []
         error_data = None
         
-        for chunk in self._execute_workflow_stream(session, messages, preset_name=preset_name):
+        for chunk in self._execute_workflow_stream(
+            session,
+            messages,
+            preset_name=preset_name,
+            stop_checker=stop_checker,
+        ):
             if chunk.startswith("data: [DONE]"):
                 continue
             

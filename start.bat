@@ -38,6 +38,8 @@ if not defined GITHUB_REPO set "GITHUB_REPO=lumingya/universal-web-api"
 if not defined PROXY_ENABLED set "PROXY_ENABLED=false"
 if not defined PROXY_ADDRESS set "PROXY_ADDRESS="
 if not defined PROXY_BYPASS set "PROXY_BYPASS=localhost,127.0.0.1"
+if not defined BROWSER_PROFILE_DIR set "BROWSER_PROFILE_DIR="
+if not defined PROFILE_CLEAN_ENABLED set "PROFILE_CLEAN_ENABLED=true"
 
 echo.
 echo   当前配置:
@@ -45,6 +47,12 @@ echo     APP_HOST     : %APP_HOST%
 echo     APP_PORT     : %APP_PORT%
 echo     BROWSER_PORT : %BROWSER_PORT%
 echo     AUTO_UPDATE  : %AUTO_UPDATE_ENABLED%
+if defined BROWSER_PROFILE_DIR (
+    echo     PROFILE_DIR   : %BROWSER_PROFILE_DIR%
+) else (
+    echo     PROFILE_DIR   : %cd%\chrome_profile
+)
+echo     PROFILE_CLEAN : %PROFILE_CLEAN_ENABLED%
 if /I "%PROXY_ENABLED%"=="true" (
     echo     PROXY        : %PROXY_ADDRESS%
 ) else (
@@ -56,33 +64,45 @@ REM ---------- 2) 检查 Python（增强版） ----------
 echo [STEP] 检查 Python 环境
 echo ----------------------------------------
 
+set "PYTHON_CMD=python"
+set "PYTHON_PATH="
+
 REM 检查 python 命令是否存在
 where python >nul 2>&1
 if %errorlevel% neq 0 (
-    echo [ERROR] 未找到 Python 命令
-    echo.
-    echo   可能的原因:
-    echo     1. 尚未安装 Python
-    echo     2. Python 未添加到系统 PATH 环境变量
-    echo.
-    echo   解决方案:
-    echo     1. 从 https://www.python.org/downloads/ 下载安装 Python 3.8+
-    echo     2. 安装时务必勾选 "Add Python to PATH"
-    echo.
-    pause
-    exit /b 1
+    if exist "venv\Scripts\python.exe" (
+        set "PYTHON_CMD=venv\Scripts\python.exe"
+        set "PYTHON_PATH=%cd%\venv\Scripts\python.exe"
+        echo [WARN] 未找到系统 Python，使用现有虚拟环境 Python: !PYTHON_PATH!
+    ) else (
+        echo [ERROR] 未找到 Python 命令
+        echo.
+        echo   可能的原因:
+        echo     1. 尚未安装 Python
+        echo     2. Python 未添加到系统 PATH 环境变量
+        echo.
+        echo   解决方案:
+        echo     1. 从 https://www.python.org/downloads/ 下载安装 Python 3.8+
+        echo     2. 安装时务必勾选 "Add Python to PATH"
+        echo.
+        pause
+        exit /b 1
+    )
 )
 
 REM 获取 python 命令的实际路径（只取第一个结果）
-set "PYTHON_PATH="
-for /f "tokens=*" %%i in ('where python 2^>nul') do (
-    if not defined PYTHON_PATH set "PYTHON_PATH=%%i"
+if /I "!PYTHON_CMD!"=="python" (
+    for /f "tokens=*" %%i in ('where python 2^>nul') do (
+        if not defined PYTHON_PATH set "PYTHON_PATH=%%i"
+    )
 )
 
 REM 检测 Windows Store 占位符
 set "IS_STORE_PYTHON=0"
-echo "!PYTHON_PATH!" | findstr /i "WindowsApps" >nul 2>&1
-if !errorlevel! equ 0 set "IS_STORE_PYTHON=1"
+if /I "!PYTHON_CMD!"=="python" (
+    echo "!PYTHON_PATH!" | findstr /i "WindowsApps" >nul 2>&1
+    if !errorlevel! equ 0 set "IS_STORE_PYTHON=1"
+)
 
 if "!IS_STORE_PYTHON!"=="1" (
     echo [ERROR] 检测到 Windows Store Python 占位符
@@ -105,11 +125,11 @@ if "!IS_STORE_PYTHON!"=="1" (
 
 REM 尝试获取版本号（方法1: sys.version_info）
 set "PYTHON_VERSION="
-for /f "tokens=*" %%i in ('python -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')" 2^>nul') do set "PYTHON_VERSION=%%i"
+for /f "tokens=*" %%i in ('!PYTHON_CMD! -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')" 2^>nul') do set "PYTHON_VERSION=%%i"
 
 REM 方法2: 如果方法1失败，尝试解析 --version 输出
 if not defined PYTHON_VERSION (
-    for /f "tokens=2 delims= " %%i in ('python --version 2^>^&1') do (
+    for /f "tokens=2 delims= " %%i in ('!PYTHON_CMD! --version 2^>^&1') do (
         for /f "tokens=1,2 delims=." %%a in ("%%i") do set "PYTHON_VERSION=%%a.%%b"
     )
 )
@@ -414,23 +434,36 @@ REM ---------- 7) 启动浏览器 ----------
 echo [STEP] 准备 Chromium 内核浏览器
 echo ----------------------------------------
 
-set "PROFILE_DIR=%PROJECT_DIR%\chrome_profile"
+if defined BROWSER_PROFILE_DIR (
+    set "PROFILE_DIR=%BROWSER_PROFILE_DIR%"
+) else (
+    set "PROFILE_DIR=%PROJECT_DIR%\chrome_profile"
+)
 if not exist "%PROFILE_DIR%" mkdir "%PROFILE_DIR%" >nul 2>&1
+echo [INFO] 浏览器配置目录: %PROFILE_DIR%
 
 REM 每次启动前自动清理配置文件
-if exist "clean_profile.py" (
-    echo [INFO] 执行浏览器配置瘦身...
-    venv\Scripts\python.exe clean_profile.py "%PROFILE_DIR%"
-    echo.
+if /I "%PROFILE_CLEAN_ENABLED%"=="true" (
+    if exist "clean_profile.py" (
+        echo [INFO] 执行浏览器配置瘦身...
+        venv\Scripts\python.exe clean_profile.py "%PROFILE_DIR%"
+        echo.
+    ) else (
+        echo [WARN] 未找到 clean_profile.py，跳过清理
+        echo.
+    )
 ) else (
-    echo [WARN] 未找到 clean_profile.py，跳过清理
+    echo [INFO] 已禁用配置瘦身（PROFILE_CLEAN_ENABLED=%PROFILE_CLEAN_ENABLED%）
     echo.
 )
 
 REM 检查调试端口
 call :check_debug_port
 if "!DEBUG_PORT_OK!"=="1" (
-    echo [OK] 调试端口已就绪 - 端口 %BROWSER_PORT%
+    echo [WARN] Debug port already in use, reuse existing browser instance.
+    echo [WARN] If background tabs are slow, close browser and restart this script.
+    echo [WARN] Restart lets script launch browser with anti-throttle flags.
+    echo [OK] Debug port ready - %BROWSER_PORT%
     goto :BROWSER_READY
 )
 
@@ -509,7 +542,7 @@ echo [OK] 检测到 !BROWSER_NAME!
 echo [INFO] 路径: !BROWSER_EXE!
 
 REM 构造浏览器启动参数
-set "BROWSER_ARGS=--remote-debugging-port=%BROWSER_PORT% --user-data-dir="%PROFILE_DIR%" --no-first-run --no-default-browser-check --disable-backgrounding-occluded-windows --disable-background-timer-throttling --disable-renderer-backgrounding"
+set "BROWSER_ARGS=--remote-debugging-port=%BROWSER_PORT% --user-data-dir=""%PROFILE_DIR%"" --no-first-run --no-default-browser-check --disable-backgrounding-occluded-windows --disable-background-timer-throttling --disable-renderer-backgrounding --disable-features=CalculateNativeWinOcclusion,AutomaticTabDiscarding,TabFreeze,IntensiveWakeUpThrottling"
 
 REM 添加代理参数（如果启用）
 if /I "%PROXY_ENABLED%"=="true" (
@@ -623,7 +656,12 @@ goto :eof
 :SetEnvVar
 REM 安全设置环境变量（处理包含括号的路径）
 if not "%~1"=="" (
-    set "%~1=%~2"
+    set "ENV_VAL=%~2"
+    if defined ENV_VAL (
+        if "!ENV_VAL:~0,1!"=="^"" if "!ENV_VAL:~-1!"=="^"" set "ENV_VAL=!ENV_VAL:~1,-1!"
+    )
+    set "%~1=!ENV_VAL!"
+    set "ENV_VAL="
     set "ENV_LOADED=1"
 )
 goto :eof

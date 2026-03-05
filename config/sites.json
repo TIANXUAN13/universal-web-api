@@ -137,7 +137,8 @@
           "hint_text": "完全专注于文件内容"
         }
       }
-    }
+    },
+    "default_preset": "主预设"
   },
   "grok.com": {
     "presets": {
@@ -206,7 +207,8 @@
           "hint_text": "完全专注于文件内容"
         }
       }
-    }
+    },
+    "default_preset": "主预设"
   },
   "chatgpt.com": {
     "presets": {
@@ -290,7 +292,8 @@
           "hint_text": "完全专注于文件内容"
         }
       }
-    }
+    },
+    "default_preset": "主预设"
   },
   "gemini.google.com": {
     "presets": {
@@ -492,7 +495,8 @@
           "hint_text": "完全专注于文件内容"
         }
       }
-    }
+    },
+    "default_preset": "主预设"
   },
   "chat.deepseek.com": {
     "presets": {
@@ -568,7 +572,8 @@
           "hint_text": "完全专注于文件内容"
         }
       }
-    }
+    },
+    "default_preset": "主预设"
   },
   "www.doubao.com": {
     "presets": {
@@ -635,7 +640,8 @@
           "hint_text": "完全专注于文件内容"
         }
       }
-    }
+    },
+    "default_preset": "主预设"
   },
   "h2ogpte.genai.h2o.ai": {
     "presets": {
@@ -709,7 +715,8 @@
           "hint_text": "完全专注于文件内容"
         }
       }
-    }
+    },
+    "default_preset": "主预设"
   },
   "claude.ai": {
     "presets": {
@@ -777,7 +784,8 @@
           "hint_text": "完全专注于文件内容"
         }
       }
-    }
+    },
+    "default_preset": "主预设"
   },
   "arena.ai": {
     "presets": {
@@ -842,7 +850,7 @@
           "initial_wait": 30,
           "enable_wrapper_search": true,
           "network": {
-            "parser": "lmarena",
+            "parser": "lmarena_side_left",
             "url_pattern": "**/nextjs-api/stream/create-evaluation**",
             "method": "POST",
             "listen_pattern": "/nextjs-api/stream/create-evaluation",
@@ -873,7 +881,8 @@
           "点击battle": "xpath://button[@role='combobox' and .//*[contains(normalize-space(), 'Battle')]]",
           "切换direct": "xpath://div[@role='option' and .//p[normalize-space()='Direct']]",
           "点击gemini3.0pro": "css:[role='option'][data-value='gemini-3-pro']",
-          "点击max": "xpath://button[@aria-haspopup='dialog' and @data-state='closed' and .//*[contains(normalize-space(), 'Max')]]"
+          "点击max": "xpath://button[@aria-haspopup='dialog' and @data-state='closed' and .//*[contains(normalize-space(), 'Max')]]",
+          "点击gemini3_0pro": "css:[role='option'][data-value='gemini-3-pro']"
         },
         "workflow": [
           {
@@ -897,8 +906,8 @@
             "target": "",
             "optional": false,
             "value": {
-              "x": 147,
-              "y": 196,
+              "x": 154,
+              "y": 139,
               "random_radius": 10
             }
           },
@@ -913,8 +922,8 @@
             "target": "",
             "optional": false,
             "value": {
-              "x": 227,
-              "y": 28,
+              "x": 307,
+              "y": 29,
               "random_radius": 10
             }
           },
@@ -922,15 +931,15 @@
             "action": "WAIT",
             "target": "",
             "optional": false,
-            "value": 0.42
+            "value": 1
           },
           {
             "action": "COORD_CLICK",
             "target": "",
             "optional": false,
             "value": {
-              "x": 313,
-              "y": 390,
+              "x": 367,
+              "y": 369,
               "random_radius": 10
             }
           }
@@ -1023,7 +1032,95 @@
           "threshold": 50000,
           "hint_text": "完全专注于文件内容"
         }
+      },
+      "主预设-side": {
+        "selectors": {
+          "input_box": "textarea[name=\"message\"]",
+          "send_btn": "button[type=\"submit\"]",
+          "result_container": "div.min-w-0:not([class*=\"bg-surface\"]) > .prose-sm",
+          "new_chat_btn": "a[href=\"/text/side-by-side\"][data-sidebar=\"menu-button\"]",
+          "message_wrapper": null,
+          "generating_indicator": null
+        },
+        "workflow": [
+          {
+            "action": "CLICK",
+            "target": "new_chat_btn",
+            "optional": true,
+            "value": null
+          },
+          {
+            "action": "WAIT",
+            "target": "",
+            "optional": false,
+            "value": 2
+          },
+          {
+            "action": "FILL_INPUT",
+            "target": "input_box",
+            "optional": false,
+            "value": null
+          },
+          {
+            "action": "KEY_PRESS",
+            "target": "Enter",
+            "optional": true,
+            "value": null
+          },
+          {
+            "action": "WAIT",
+            "target": "",
+            "optional": false,
+            "value": 0.5
+          },
+          {
+            "action": "KEY_PRESS",
+            "target": "Enter",
+            "optional": false,
+            "value": null
+          },
+          {
+            "action": "STREAM_WAIT",
+            "target": "result_container",
+            "optional": false,
+            "value": null
+          }
+        ],
+        "stealth": true,
+        "stream_config": {
+          "mode": "network",
+          "hard_timeout": 300,
+          "silence_threshold": 2.5,
+          "initial_wait": 30,
+          "enable_wrapper_search": true,
+          "network": {
+            "parser": "lmarena_side_left",
+            "url_pattern": "**/nextjs-api/stream/create-evaluation**",
+            "method": "POST",
+            "listen_pattern": "/nextjs-api/stream/create-evaluation",
+            "first_response_timeout": 300,
+            "silence_threshold": 3,
+            "response_interval": 1
+          }
+        },
+        "image_extraction": {
+          "enabled": false,
+          "selector": "img",
+          "container_selector": null,
+          "debounce_seconds": 2,
+          "wait_for_load": true,
+          "load_timeout_seconds": 5,
+          "download_blobs": true,
+          "max_size_mb": 10,
+          "mode": "all"
+        },
+        "file_paste": {
+          "enabled": false,
+          "threshold": 50000,
+          "hint_text": "完全专注于文件内容"
+        }
       }
-    }
+    },
+    "default_preset": "主预设-side"
   }
 }

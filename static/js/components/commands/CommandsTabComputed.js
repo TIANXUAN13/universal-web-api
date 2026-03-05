@@ -25,19 +25,43 @@ window.CommandsTabComputed = {
         disabledCount() {
             return (this.commands || []).filter(cmd => !cmd.enabled).length;
         },
-        totalPages() {
-            return Math.max(1, Math.ceil((this.commands || []).length / this.pageSize));
+        displayRows() {
+            const rows = [];
+            const groupRowMap = {};
+            for (const cmd of (this.commands || [])) {
+                const groupName = String(cmd?.group_name || '').trim();
+                if (!groupName) {
+                    rows.push({
+                        key: 'cmd_' + cmd.id,
+                        isGroup: false,
+                        groupName: '',
+                        commands: [cmd]
+                    });
+                    continue;
+                }
+                if (!groupRowMap[groupName]) {
+                    const row = {
+                        key: 'group_' + groupName,
+                        isGroup: true,
+                        groupName,
+                        commands: []
+                    };
+                    groupRowMap[groupName] = row;
+                    rows.push(row);
+                }
+                groupRowMap[groupName].commands.push(cmd);
+            }
+            return rows;
         },
-        paginatedCommands() {
-            const start = (this.currentPage - 1) * this.pageSize;
-            return (this.commands || []).slice(start, start + this.pageSize);
+        totalPages() {
+            return Math.max(1, Math.ceil((this.displayRows || []).length / this.pageSize));
         },
         pageStartIndex() {
-            if (!this.commands.length) return 0;
+            if (!this.displayRows.length) return 0;
             return (this.currentPage - 1) * this.pageSize + 1;
         },
         pageEndIndex() {
-            return Math.min(this.currentPage * this.pageSize, this.commands.length);
+            return Math.min(this.currentPage * this.pageSize, this.displayRows.length);
         },
         visiblePageNumbers() {
             const total = this.totalPages;
@@ -78,32 +102,8 @@ window.CommandsTabComputed = {
             return this.commandGroups.map(group => ({ value: group.name, label: group.name }));
         },
         paginatedDisplayRows() {
-            const rows = [];
-            const groupRowMap = {};
-            for (const cmd of (this.paginatedCommands || [])) {
-                const groupName = String(cmd?.group_name || '').trim();
-                if (!groupName) {
-                    rows.push({
-                        key: 'cmd_' + cmd.id,
-                        isGroup: false,
-                        groupName: '',
-                        commands: [cmd]
-                    });
-                    continue;
-                }
-                if (!groupRowMap[groupName]) {
-                    const row = {
-                        key: 'group_' + groupName,
-                        isGroup: true,
-                        groupName,
-                        commands: []
-                    };
-                    groupRowMap[groupName] = row;
-                    rows.push(row);
-                }
-                groupRowMap[groupName].commands.push(cmd);
-            }
-            return rows;
+            const start = (this.currentPage - 1) * this.pageSize;
+            return (this.displayRows || []).slice(start, start + this.pageSize);
         },
         visiblePageCommandIds() {
             const ids = [];

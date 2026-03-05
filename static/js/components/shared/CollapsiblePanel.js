@@ -6,7 +6,7 @@ window.CollapsiblePanel = {
         title: { type: String, required: true },
         icon: { type: String, default: '' },
         badge: { type: [String, Number], default: null },
-        collapsed: { type: Boolean, default: false },
+        collapsed: { type: Boolean, default: true },
         headerClass: { type: String, default: '' }
     },
     emits: ['toggle'],

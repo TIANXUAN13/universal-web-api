@@ -25,7 +25,7 @@ window.WorkflowPanel = {
         selectors: { type: Object, required: true },
         currentDomain: { type: String, default: null },
         selectedPreset: { type: String, default: '主预设' },
-        collapsed: { type: Boolean, default: false }
+        collapsed: { type: Boolean, default: true }
     },
     emits: ['update:collapsed', 'add-step', 'remove-step', 'move-step', 'action-change', 'show-templates'],
     data() {
@@ -116,7 +116,7 @@ window.WorkflowPanel = {
             <div class="px-4 py-3 border-b dark:border-gray-700 flex justify-between items-center cursor-pointer hover:bg-gray-50 dark:hover:bg-gray-700/50 transition-colors"
                  @click="toggle">
                 <div class="flex items-center gap-2">
-                    <span class="text-gray-500 dark:text-gray-400" v-html="collapsed ? $icons.chevronDown : $icons.chevronUp"></span>
+                    <span class="w-4 inline-flex justify-center text-gray-500 dark:text-gray-400" v-html="collapsed ? $icons.chevronDown : $icons.chevronUp"></span>
                     <h3 class="font-semibold text-gray-900 dark:text-white">工作流</h3>
                     <span class="text-sm text-gray-500 dark:text-gray-400">({{ workflow.length }} 步)</span>
                 </div>
@@ -283,3 +283,4 @@ window.WorkflowPanel = {
         </div>
     `
 };
+

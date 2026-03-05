@@ -14,6 +14,7 @@ from .chatgpt_parser import ChatGPTParser
 from .deepseek_parser import DeepSeekParser
 from .aistudio_parser import AIStudioParser
 from .lmarena_parser import LmarenaParser
+from .lmarena_side_left_parser import LmarenaSideLeftParser
 
 # 自动注册内置解析器
 ParserRegistry.register_class(GeminiParser)
@@ -21,6 +22,7 @@ ParserRegistry.register_class(ChatGPTParser)
 ParserRegistry.register_class(DeepSeekParser)
 ParserRegistry.register_class(AIStudioParser)
 ParserRegistry.register_class(LmarenaParser)
+ParserRegistry.register_class(LmarenaSideLeftParser)
 
 __all__ = [
     'ResponseParser',
@@ -30,4 +32,5 @@ __all__ = [
     'DeepSeekParser',
     'AIStudioParser',
     'LmarenaParser',
+    'LmarenaSideLeftParser',
 ]

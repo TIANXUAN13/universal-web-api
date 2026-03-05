@@ -9,6 +9,7 @@ app/core/tab_pool.py - 标签页池管理器 (v1.05)
 """
 
 import asyncio
+import os
 import threading
 import time
 from dataclasses import dataclass, field
@@ -63,6 +64,8 @@ class TabSession:
                 "about:blank", 
                 "chrome://newtab/",
                 "chrome://new-tab-page/",
+                "devtools://",
+                "chrome-devtools://",
                 "chrome-error://",
                 "about:neterror"
             )
@@ -100,9 +103,26 @@ class TabSession:
             self.last_used_at = time.time()
             self.request_count += 1
             return True
-    
-    def release(self, clear_page: bool = False, check_triggers: bool = True):
+
+    def acquire_for_command(self, task_id: str) -> bool:
+        """Acquire tab for command execution without incrementing request counter."""
         with self._lock:
+            if self.status != TabStatus.IDLE:
+                return False
+            self.status = TabStatus.BUSY
+            self.current_task_id = task_id
+            self.last_used_at = time.time()
+            return True
+    
+    def release(
+        self,
+        clear_page: bool = False,
+        check_triggers: bool = True,
+        rollback_request_count: bool = False
+    ):
+        with self._lock:
+            if rollback_request_count and self.request_count > 0:
+                self.request_count -= 1
             self.status = TabStatus.IDLE
             self.current_task_id = None
             self.last_used_at = time.time()
@@ -112,9 +132,9 @@ class TabSession:
                     self.tab.get("about:blank")
                     self.current_domain = None
                 except Exception as e:
-                    logger.debug(f"清空页面失败: {e}")
+                    logger.debug(f"clear page failed: {e}")
         
-        # 🆕 触发命令检查（在锁外执行，避免阻塞）
+        # Trigger command checks outside the lock to avoid blocking
         try:
             from app.services.command_engine import command_engine
             if check_triggers:
@@ -122,32 +142,43 @@ class TabSession:
         except Exception as e:
             logger.debug(f"命令触发检查异常: {e}")
     
-    def force_release(self):
-        """强制释放（不管当前状态）- 修复版：尝试重置页面，失败则标记为 ERROR"""
-        # 先标记为 ERROR，防止被其他线程获取
+    def force_release(self, clear_page: bool = False, check_triggers: bool = False):
+        """Force release tab lock and optionally refresh current page."""
         with self._lock:
-            self.status = TabStatus.ERROR
+            self.status = TabStatus.IDLE
             self.current_task_id = None
             self.last_used_at = time.time()
-        
-        # 在锁外尝试重置页面（避免阻塞其他线程）
-        reset_success = False
+
         try:
-            self.tab.get("about:blank")
-            self.current_domain = None
-            reset_success = True
-        except Exception as e:
-            logger.warning(f"[{self.id}] 重置页面失败: {e}")
-        
-        # 根据重置结果更新状态
+            if hasattr(self.tab, "stop_loading"):
+                self.tab.stop_loading()
+            self.tab.run_js("if (window.stop) { window.stop(); }")
+        except Exception:
+            pass
+
+        reset_success = True
+        if clear_page:
+            try:
+                self.tab.refresh()
+            except Exception as e:
+                logger.warning(f"[{self.id}] force_release refresh failed: {e}")
+                reset_success = False
+
         with self._lock:
             if reset_success:
                 self.status = TabStatus.IDLE
-                logger.info(f"[{self.id}] 强制释放成功，已重置为空白页")
+                logger.info(f"[{self.id}] force_release done")
             else:
                 self.error_count += 1
-                logger.warning(f"[{self.id}] 强制释放失败，标记为 ERROR（将被移出池）")
-    
+                logger.warning(f"[{self.id}] force_release failed, set ERROR")
+
+        if check_triggers:
+            try:
+                from app.services.command_engine import command_engine
+                command_engine.check_triggers(self)
+            except Exception as e:
+                logger.debug(f"command trigger check failed: {e}")
+
     def activate(self) -> bool:
         """激活标签页（使其成为浏览器焦点）"""
         try:
@@ -436,6 +467,9 @@ class TabPoolManager:
         self._known_tab_ids: set = set()
         # 🆕 记录当前活动的标签页 ID（避免重复激活）
         self._active_session_id: Optional[str] = None
+        self._auto_activate_on_acquire = self._to_bool(
+            os.getenv("TAB_AUTO_ACTIVATE_ON_ACQUIRE"), False
+        )
         
         # 🆕 持久化编号系统
         self._next_persistent_index: int = 1  # 下一个可分配的编号
@@ -610,6 +644,7 @@ class TabPoolManager:
             # ===== 第三步：扫描新标签页 =====
             skip_urls = [
                 "chrome://", "chrome-error://", "about:blank",
+                "devtools://", "chrome-devtools://",
                 "edge://", "brave://",
             ]
             
@@ -666,6 +701,7 @@ class TabPoolManager:
             
             skip_urls = [
                 "chrome://", "chrome-error://", "about:blank",
+                "devtools://", "chrome-devtools://",
                 "edge://", "brave://",
             ]
             
@@ -724,11 +760,19 @@ class TabPoolManager:
                 busy_duration = now - session.last_used_at
                 
                 if busy_duration > self.STUCK_TIMEOUT:
+                    task_id = session.current_task_id or ""
+                    cancelled = False
+                    if task_id:
+                        try:
+                            from app.services.request_manager import request_manager
+                            cancelled = bool(request_manager.cancel_request(task_id, "stuck_timeout"))
+                        except Exception as e:
+                            logger.debug(f"[{session.id}] stuck cancel failed (ignored): {e}")
                     logger.warning(
-                        f"[{session.id}] 卡死 {busy_duration:.0f}s，强制释放 "
-                        f"(任务: {session.current_task_id})"
+                        f"[{session.id}] stuck for {busy_duration:.0f}s, force release "
+                        f"(task={task_id or '-'}, cancelled={cancelled})"
                     )
-                    session.force_release()
+                    session.force_release(clear_page=False, check_triggers=False)
     
     def _cleanup_unhealthy_tabs(self):
         """清理不健康的空闲标签页和错误状态的标签页"""
@@ -767,6 +811,19 @@ class TabPoolManager:
             
             del self._tabs[tab_id]
     
+    def _should_defer_to_command(self, session: TabSession, task_id: str) -> bool:
+        """Whether request acquisition should defer to high-priority pending/running commands."""
+        task = str(task_id or "").strip().lower()
+        if task.startswith("cmd_") or task.startswith("group_"):
+            return False
+        try:
+            from app.services.command_engine import command_engine
+            if hasattr(command_engine, "should_block_request_for_session"):
+                return bool(command_engine.should_block_request_for_session(session, task_id=task_id))
+        except Exception:
+            return False
+        return False
+
     def acquire(self, task_id: str, timeout: float = None) -> Optional[TabSession]:
         """获取一个可用的标签页（增强版）"""
         timeout = timeout or self.acquire_timeout
@@ -798,11 +855,15 @@ class TabPoolManager:
                             logger.warning(f"[{session.id}] 标签页不健康，跳过")
                             continue
                         
+                        if self._should_defer_to_command(session, task_id):
+                            logger.debug(f"[{session.id}] defer acquire to high-priority command")
+                            continue
+
                         if session.acquire(task_id):
                             # 忙碌前先暂停该标签页全局监听，避免和工作流监听冲突
                             self._stop_global_monitor_for_session(session.id, reason="acquire")
-                            # 🆕 仅当不是当前活动标签页时才激活
-                            if session.id != self._active_session_id:
+                            # 可选：自动激活标签页（默认关闭，避免抢占用户焦点）
+                            if self._auto_activate_on_acquire and session.id != self._active_session_id:
                                 session.activate()
                                 self._active_session_id = session.id
                             
@@ -843,12 +904,22 @@ class TabPoolManager:
     async def acquire_async(self, task_id: str, timeout: float = None) -> Optional[TabSession]:
         return await asyncio.to_thread(self.acquire, task_id, timeout)
     
-    def release(self, tab_id: str, clear_page: bool = False, check_triggers: bool = True):
+    def release(
+        self,
+        tab_id: str,
+        clear_page: bool = False,
+        check_triggers: bool = True,
+        rollback_request_count: bool = False
+    ):
         """释放标签页"""
         with self._condition:
             session = self._tabs.get(tab_id)
             if session:
-                session.release(clear_page=clear_page, check_triggers=check_triggers)
+                session.release(
+                    clear_page=clear_page,
+                    check_triggers=check_triggers,
+                    rollback_request_count=rollback_request_count
+                )
                 self._start_global_monitor_for_session(session)
                 self._condition.notify_all()
                 logger.debug(f"[{tab_id}] 已释放")
@@ -859,7 +930,7 @@ class TabPoolManager:
             count = 0
             for session in self._tabs.values():
                 if session.status == TabStatus.BUSY:
-                    session.force_release()
+                    session.force_release(clear_page=False, check_triggers=False)
                     if session.status == TabStatus.IDLE:
                         self._start_global_monitor_for_session(session)
                     count += 1
@@ -947,12 +1018,20 @@ class TabPoolManager:
                     return None
                 
                 # 尝试获取
+                if self._should_defer_to_command(session, task_id):
+                    logger.debug(f"[{session.id}] defer by index acquire to high-priority command")
+                    remaining = deadline - time.time()
+                    if remaining <= 0:
+                        return None
+                    self._condition.wait(timeout=min(remaining, 0.5))
+                    continue
+
                 if session.status == TabStatus.IDLE:
                     if session.acquire(task_id):
                         # 忙碌前先暂停该标签页全局监听，避免和工作流监听冲突
                         self._stop_global_monitor_for_session(session.id, reason="acquire_by_index")
-                        # 🆕 仅当不是当前活动标签页时才激活
-                        if session.id != self._active_session_id:
+                        # 可选：自动激活标签页（默认关闭，避免抢占用户焦点）
+                        if self._auto_activate_on_acquire and session.id != self._active_session_id:
                             session.activate()
                             self._active_session_id = session.id
                         logger.info(f"TabPool → {session.id} (#{persistent_index})")
@@ -1011,9 +1090,11 @@ class TabPoolManager:
 
             was_busy = session.status == TabStatus.BUSY
             if was_busy:
-                session.force_release()
+                session.force_release(clear_page=clear_page, check_triggers=False)
             elif clear_page:
-                session.release(clear_page=True, check_triggers=False)
+                session.force_release(clear_page=True, check_triggers=False)
+            else:
+                session.release(clear_page=False, check_triggers=False)
 
             # 尽量恢复可用状态的全局监听
             if session.status == TabStatus.IDLE:
@@ -1121,6 +1202,11 @@ class TabPoolManager:
                 "last_scan": round(time.time() - self._last_scan_time, 1),
                 "tabs": tabs_info
             }
+
+    def get_idle_sessions_snapshot(self) -> List[TabSession]:
+        """Return a shallow snapshot of currently idle tab sessions."""
+        with self._lock:
+            return [s for s in self._tabs.values() if s.status == TabStatus.IDLE]
     
     def shutdown(self):
         with self._lock:

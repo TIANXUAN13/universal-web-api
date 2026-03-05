@@ -1,11 +1,16 @@
 """
 main.py - FastAPI 应用入口
 """
+import asyncio
 import logging
 logging.getLogger("urllib3").setLevel(logging.WARNING)
 import os
 import logging
+import socket
 import sys
+import threading
+import time
+from urllib.request import urlopen
 print(f"[DEBUG] Python: {sys.executable}")
 from pathlib import Path
 from contextlib import asynccontextmanager
@@ -31,11 +36,97 @@ logging.basicConfig(
 logger = get_logger("MAIN")
 
 
+def _setup_windows_event_loop_policy():
+    """
+    在 Windows 上优先使用 SelectorEventLoop，规避 Proactor 在连接断开时
+    偶发抛出的 _ProactorBasePipeTransport/_call_connection_lost 噪音栈。
+    """
+    if not sys.platform.startswith("win"):
+        return
+    try:
+        asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+    except Exception as e:
+        logger.debug(f"设置 WindowsSelectorEventLoopPolicy 失败（忽略）: {e}")
+
+
+def _install_asyncio_exception_filter():
+    """过滤已知且无害的 Windows 连接断开噪音异常。"""
+    try:
+        loop = asyncio.get_running_loop()
+    except Exception:
+        return
+
+    default_handler = loop.get_exception_handler()
+
+    def _handler(l, context):
+        exc = context.get("exception")
+        message = str(context.get("message", "") or "")
+        callback = str(context.get("handle", "") or "")
+        is_known_reset = isinstance(exc, ConnectionResetError)
+        is_proactor_noise = "_ProactorBasePipeTransport._call_connection_lost" in callback or "proactor_events" in message
+
+        if is_known_reset and is_proactor_noise:
+            logger.debug(f"[asyncio] 忽略已知连接断开噪音: {exc}")
+            return
+        if is_known_reset and isinstance(exc, OSError) and getattr(exc, "errno", None) in (10054, 10053):
+            logger.debug(f"[asyncio] 忽略连接重置噪音: {exc}")
+            return
+
+        if default_handler is not None:
+            default_handler(l, context)
+        else:
+            l.default_exception_handler(context)
+
+    loop.set_exception_handler(_handler)
+
+
+_setup_windows_event_loop_policy()
+
+
 # ================= Lifespan =================
+
+def _open_tutorial_non_blocking(tutorial_url: str, initial_delay_sec: float = 1.2):
+    """后台打开教程页，避免在启动阶段阻塞主服务。"""
+    def _worker():
+        try:
+            time.sleep(max(0.0, float(initial_delay_sec)))
+
+            # 等待本地 HTTP 服务可达，避免 lifespan 内部自访问卡住。
+            ready = False
+            for _ in range(12):
+                try:
+                    with urlopen(tutorial_url, timeout=1.2) as resp:
+                        status_code = int(getattr(resp, "status", 200) or 200)
+                        if 200 <= status_code < 500:
+                            ready = True
+                            break
+                except Exception:
+                    time.sleep(0.5)
+
+            if not ready:
+                logger.warning(f"[startup] 教程页服务未就绪，跳过自动打开: {tutorial_url}")
+                return
+
+            browser = get_browser(auto_connect=False)
+            if not browser.ensure_connection():
+                logger.warning("[startup] 浏览器不可用，跳过自动打开教程页")
+                return
+
+            browser.page.get(tutorial_url, retry=0, show_errmsg=False)
+            logger.info(f"📚 教程页已后台打开: {tutorial_url}")
+        except Exception as e:
+            logger.warning(f"[startup] 后台打开教程页失败: {e}")
+
+    threading.Thread(
+        target=_worker,
+        daemon=True,
+        name="open-tutorial-non-blocking",
+    ).start()
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """应用生命周期管理"""
+    _install_asyncio_exception_filter()
     logger.info("=" * 60)
     logger.info("Universal Web-to-API 服务启动中...")       
     # 启动时清理临时文件目录
@@ -80,8 +171,8 @@ async def lifespan(app: FastAPI):
             if should_open_tutorial:
                 try:
                     tutorial_url = f"http://{AppConfig.get_host()}:{AppConfig.get_port()}/static/tutorial.html"
-                    logger.info(f"📚 首次启动，打开教程页: {tutorial_url}")
-                    browser.page.get(tutorial_url, retry=0, show_errmsg=False)
+                    logger.info(f"📚 首次启动，后台打开教程页（非阻塞）: {tutorial_url}")
+                    _open_tutorial_non_blocking(tutorial_url, initial_delay_sec=1.2)
                 except Exception as e:
                     logger.warning(f"⚠️ 无法打开教程页: {e}")
             else:
@@ -94,6 +185,17 @@ async def lifespan(app: FastAPI):
         
     except Exception as e:
         logger.warning(f"⚠️ 浏览器检查跳过: {e}")
+
+    # 显式预热命令调度器，避免依赖控制面板接口后才初始化。
+    try:
+        from app.services.command_engine import command_engine
+        command_engine.ensure_scheduler_running()
+        logger.info(
+            f"[startup] 命令调度器: "
+            f"{'running' if command_engine.is_scheduler_running() else 'stopped'}"
+        )
+    except Exception as e:
+        logger.warning(f"[startup] 命令调度器初始化失败: {e}")
 
     logger.info("")
     logger.info("🚀 服务已就绪！")

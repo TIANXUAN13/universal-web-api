@@ -338,6 +338,10 @@ class RenamePresetRequest(BaseModel):
     old_name: str = Field(..., min_length=1, max_length=50)
     new_name: str = Field(..., min_length=1, max_length=50)
 
+class SetDefaultPresetRequest(BaseModel):
+    """设置默认预设请求"""
+    preset_name: str = Field(..., min_length=1, max_length=50)
+
 
 class TerminateTabRequest(BaseModel):
     """终止标签页当前任务请求"""
@@ -410,7 +414,8 @@ async def get_site_presets(
     try:
         from app.services.config_engine import config_engine
         presets = config_engine.list_presets(domain)
-        return {"domain": domain, "presets": presets}
+        default_preset = config_engine.get_default_preset(domain)
+        return {"domain": domain, "presets": presets, "default_preset": default_preset}
     except Exception as e:
         logger.error(f"获取预设列表失败: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -460,6 +465,32 @@ async def rename_site_preset(
         raise
     except Exception as e:
         logger.error(f"重命名预设失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.put("/api/presets/{domain}/default")
+async def set_site_default_preset(
+    domain: str,
+    body: SetDefaultPresetRequest,
+    authenticated: bool = Depends(verify_auth)
+):
+    """设置站点默认预设"""
+    try:
+        from app.services.config_engine import config_engine
+        success = config_engine.set_default_preset(domain, body.preset_name)
+
+        if success:
+            return {
+                "success": True,
+                "message": f"默认预设已设置为 '{body.preset_name}'",
+                "domain": domain,
+                "default_preset": body.preset_name
+            }
+        else:
+            raise HTTPException(status_code=400, detail="设置失败（站点或预设不存在）")
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"设置默认预设失败: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 

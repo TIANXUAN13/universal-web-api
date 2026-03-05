@@ -20,6 +20,11 @@ window.CommandsTabMethods = {
                 const validIds = new Set(this.commands.map(cmd => cmd.id));
                 this.selectedCommandIds = (this.selectedCommandIds || []).filter(id => validIds.has(id));
                 this.syncGroupCollapseState();
+                const hasExistingSelection = (this.commandGroups || []).some(group => group.name === this.selectedExistingGroupName);
+                if (!hasExistingSelection) {
+                    this.selectedExistingGroupName = this.commandGroups[0]?.name || '';
+                }
+                this.clearGroupDragState();
                 this.ensureValidPage();
             } catch (e) {
                 this.$emit('notify', { type: 'error', message: '加载命令失败: ' + e.message });
@@ -60,7 +65,11 @@ window.CommandsTabMethods = {
                 abort_on_match: true,
                 scope: 'all',
                 domain: '',
-                tab_index: null
+                tab_index: null,
+                priority: 2,
+                periodic_enabled: true,
+                periodic_interval_sec: 8,
+                periodic_jitter_sec: 2
             };
             normalized.trigger = this.ensureTriggerDefaults(normalized.trigger);
             if (normalized.trigger.command_id === undefined) {
@@ -84,9 +93,20 @@ window.CommandsTabMethods = {
             if (!next.match_mode) next.match_mode = 'keyword';
             if (!next.status_codes) next.status_codes = '403,429,500,502,503,504';
             if (next.abort_on_match === undefined) next.abort_on_match = true;
+            const priority = Number(next.priority);
+            next.priority = Number.isFinite(priority) ? Math.min(4, Math.max(1, Math.floor(priority))) : 2;
             if (!next.url_pattern && next.type === 'network_request_error') {
                 next.url_pattern = '';
             }
+            if (next.periodic_enabled === undefined) next.periodic_enabled = true;
+            const periodicInterval = Number(next.periodic_interval_sec);
+            next.periodic_interval_sec = Number.isFinite(periodicInterval) && periodicInterval >= 1
+                ? periodicInterval
+                : 8;
+            const periodicJitter = Number(next.periodic_jitter_sec);
+            next.periodic_jitter_sec = Number.isFinite(periodicJitter) && periodicJitter >= 0
+                ? periodicJitter
+                : 2;
             return next;
         },
 
@@ -394,7 +414,10 @@ window.CommandsTabMethods = {
                     abort_on_match: true,
                     scope: 'all',
                     domain: '',
-                    tab_index: null
+                    tab_index: null,
+                    periodic_enabled: true,
+                    periodic_interval_sec: 8,
+                    periodic_jitter_sec: 2
                 },
                 actions: [{ type: 'clear_cookies' }, { type: 'refresh_page' }],
                 group_name: '',
@@ -563,6 +586,25 @@ window.CommandsTabMethods = {
                     return;
                 }
             }
+            const periodicInterval = Number(trigger.periodic_interval_sec);
+            if (!Number.isFinite(periodicInterval) || periodicInterval < 1) {
+                this.$emit('notify', { type: 'error', message: '周期检测间隔必须是大于等于 1 秒的数字。' });
+                return;
+            }
+            const periodicJitter = Number(trigger.periodic_jitter_sec);
+            if (!Number.isFinite(periodicJitter) || periodicJitter < 0) {
+                this.$emit('notify', { type: 'error', message: '周期检测抖动必须是大于等于 0 的数字。' });
+                return;
+            }
+            const priority = Number(trigger.priority);
+            if (!Number.isFinite(priority) || priority < 1 || priority > 4) {
+                this.$emit('notify', { type: 'error', message: '命令优先级必须是 1 到 4 的整数。' });
+                return;
+            }
+            trigger.periodic_interval_sec = periodicInterval;
+            trigger.periodic_jitter_sec = periodicJitter;
+            trigger.periodic_enabled = !!trigger.periodic_enabled;
+            trigger.priority = Math.min(4, Math.max(1, Math.floor(priority)));
             const presetActions = (this.editingCommand.actions || []).filter(action => ['execute_preset', 'execute_workflow'].includes(action.type));
             const missingPreset = presetActions.some(action => !String(action.preset_name || '').trim());
             if (missingPreset) {
@@ -714,32 +756,136 @@ window.CommandsTabMethods = {
             return '命令组' + idx;
         },
 
+        clearGroupDragState() {
+            this.draggingCommandId = '';
+            this.dragOverGroupName = '';
+        },
+
+        beginGroupDrag(commandId, event) {
+            if (this.groupWorking) return;
+            this.draggingCommandId = String(commandId || '').trim();
+            this.dragOverGroupName = '';
+            if (this.draggingCommandId) {
+                this.showGroupTools = true;
+            }
+            if (event?.dataTransfer && this.draggingCommandId) {
+                event.dataTransfer.setData('text/plain', this.draggingCommandId);
+                event.dataTransfer.effectAllowed = 'move';
+            }
+        },
+
+        isGroupDropTarget(groupName) {
+            const name = String(groupName || '').trim();
+            return !!name && name === String(this.dragOverGroupName || '').trim();
+        },
+
+        onGroupDragOver(groupName, event) {
+            if (this.groupWorking) return;
+            if (!String(this.draggingCommandId || '').trim()) return;
+            const name = String(groupName || '').trim();
+            if (!name) return;
+            this.dragOverGroupName = name;
+            if (event?.dataTransfer) {
+                event.dataTransfer.dropEffect = 'move';
+            }
+        },
+
+        onGroupDragLeave(groupName) {
+            const name = String(groupName || '').trim();
+            if (!name) return;
+            if (this.dragOverGroupName === name) {
+                this.dragOverGroupName = '';
+            }
+        },
+
+        async assignCommandsToGroup(commandIds, groupName, successPrefix = '命令分组已更新') {
+            const ids = Array.isArray(commandIds)
+                ? commandIds.map(id => String(id || '').trim()).filter(Boolean)
+                : [];
+            const normalizedGroup = String(groupName || '').trim();
+            if (ids.length === 0) {
+                this.$emit('notify', { type: 'error', message: '没有可更新的命令。' });
+                return 0;
+            }
+
+            this.groupWorking = true;
+            try {
+                const result = await this.apiRequest('/api/command-groups', {
+                    method: 'PUT',
+                    body: JSON.stringify({
+                        command_ids: ids,
+                        group_name: normalizedGroup
+                    })
+                });
+                const updated = Number(result.updated || 0);
+                this.$emit('notify', {
+                    type: updated > 0 ? 'success' : 'error',
+                    message: successPrefix + '（' + updated + ' 条）'
+                });
+                if (normalizedGroup) {
+                    this.pendingGroupName = normalizedGroup;
+                    this.selectedExistingGroupName = normalizedGroup;
+                }
+                await this.fetchCommands();
+                return updated;
+            } catch (e) {
+                this.$emit('notify', { type: 'error', message: '分组更新失败: ' + e.message });
+                return 0;
+            } finally {
+                this.groupWorking = false;
+                this.clearGroupDragState();
+            }
+        },
+
+        async onGroupDrop(groupName) {
+            const targetGroup = String(groupName || '').trim();
+            const commandId = String(this.draggingCommandId || '').trim();
+            this.clearGroupDragState();
+            if (!targetGroup || !commandId || this.groupWorking) return;
+            const command = (this.commands || []).find(item => item.id === commandId);
+            if (!command) return;
+
+            const currentGroup = String(command.group_name || '').trim();
+            if (currentGroup === targetGroup) {
+                this.$emit('notify', { type: 'success', message: '该命令已经在命令组：' + targetGroup });
+                return;
+            }
+
+            await this.assignCommandsToGroup(
+                [commandId],
+                targetGroup,
+                '已拖动加入命令组：' + targetGroup
+            );
+        },
+
         async assignSelectedToGroup() {
             if (!this.hasSelection) {
                 this.$emit('notify', { type: 'error', message: '请先勾选命令。' });
                 return;
             }
             const groupName = String(this.pendingGroupName || '').trim() || this.getNextDefaultGroupName();
-            this.groupWorking = true;
-            try {
-                const result = await this.apiRequest('/api/command-groups', {
-                    method: 'PUT',
-                    body: JSON.stringify({
-                        command_ids: this.selectedCommandIds,
-                        group_name: groupName
-                    })
-                });
-                this.pendingGroupName = groupName;
-                this.$emit('notify', {
-                    type: 'success',
-                    message: '已收纳到命令组：' + groupName + '（' + (result.updated || 0) + ' 条）'
-                });
-                await this.fetchCommands();
-            } catch (e) {
-                this.$emit('notify', { type: 'error', message: '收纳失败: ' + e.message });
-            } finally {
-                this.groupWorking = false;
+            await this.assignCommandsToGroup(
+                this.selectedCommandIds,
+                groupName,
+                '已收纳到命令组：' + groupName
+            );
+        },
+
+        async assignSelectedToExistingGroup() {
+            if (!this.hasSelection) {
+                this.$emit('notify', { type: 'error', message: '请先勾选命令。' });
+                return;
             }
+            const groupName = String(this.selectedExistingGroupName || '').trim();
+            if (!groupName) {
+                this.$emit('notify', { type: 'error', message: '请先选择已有命令组。' });
+                return;
+            }
+            await this.assignCommandsToGroup(
+                this.selectedCommandIds,
+                groupName,
+                '已加入已有命令组：' + groupName
+            );
         },
 
         async ungroupSelectedCommands() {
@@ -747,25 +893,11 @@ window.CommandsTabMethods = {
                 this.$emit('notify', { type: 'error', message: '请先勾选命令。' });
                 return;
             }
-            this.groupWorking = true;
-            try {
-                const result = await this.apiRequest('/api/command-groups', {
-                    method: 'PUT',
-                    body: JSON.stringify({
-                        command_ids: this.selectedCommandIds,
-                        group_name: ''
-                    })
-                });
-                this.$emit('notify', {
-                    type: 'success',
-                    message: '已解散选中命令的分组（' + (result.updated || 0) + ' 条）'
-                });
-                await this.fetchCommands();
-            } catch (e) {
-                this.$emit('notify', { type: 'error', message: '解散失败: ' + e.message });
-            } finally {
-                this.groupWorking = false;
-            }
+            await this.assignCommandsToGroup(
+                this.selectedCommandIds,
+                '',
+                '已解散选中命令的分组'
+            );
         },
 
         async disbandGroup(groupName) {
@@ -818,6 +950,16 @@ window.CommandsTabMethods = {
             if (this.currentPage < 1) {
                 this.currentPage = 1;
             }
+        },
+
+        applyPageSize() {
+            const value = Number(this.pageSize);
+            if (!Number.isFinite(value) || value <= 0) {
+                this.pageSize = 16;
+            } else {
+                this.pageSize = Math.min(500, Math.floor(value));
+            }
+            this.changePage(1);
         },
 
         changePage(page) {
