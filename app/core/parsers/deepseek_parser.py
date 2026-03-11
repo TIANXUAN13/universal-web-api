@@ -8,6 +8,7 @@ deepseek_parser.py - DeepSeek 响应解析器
 """
 
 import json
+import re
 from typing import Dict, Any, List
 
 from app.core.config import logger
@@ -115,7 +116,7 @@ class DeepSeekParser(ResponseParser):
             except json.JSONDecodeError:
                 continue
         
-        return content
+        return self._sanitize_output_text(content)
     
     def _extract_content(self, data: Dict[str, Any]) -> str:
         """从数据事件中提取文本内容"""
@@ -147,9 +148,11 @@ class DeepSeekParser(ResponseParser):
             fragments = response.get("fragments", [])
             for frag in fragments:
                 if isinstance(frag, dict) and "content" in frag:
-                    content += frag["content"]
+                    frag_text = self._coerce_text(frag.get("content"))
+                    if frag_text:
+                        content += frag_text
             return content
-        
+
         return content
     
     def _extract_batch_content(self, op: Dict[str, Any]) -> str:
@@ -163,14 +166,43 @@ class DeepSeekParser(ResponseParser):
             content = ""
             for frag in value:
                 if isinstance(frag, dict) and "content" in frag:
-                    content += frag["content"]
+                    frag_text = self._coerce_text(frag.get("content"))
+                    if frag_text:
+                        content += frag_text
             return content
         
         # 内容追加
         if "content" in path and operation == "APPEND" and isinstance(value, str):
             return value
-        
+
         return ""
+
+    def _coerce_text(self, value: Any) -> str:
+        """将响应片段安全转为文本，避免 None 导致拼接异常。"""
+        if value is None:
+            return ""
+        if isinstance(value, str):
+            return value
+        if isinstance(value, (int, float, bool)):
+            return str(value)
+        return ""
+
+    def _sanitize_output_text(self, text: str) -> str:
+        """
+        清洗 DeepSeek 返回中的噪音标记：
+        - FINISHEDSEARCH / FINISHED
+        - [citation:n]
+        """
+        if not text:
+            return ""
+
+        cleaned = text
+        cleaned = re.sub(r"\[citation:\d+\]", "", cleaned)
+        cleaned = re.sub(r"\bFINISHEDSEARCH\b", "", cleaned)
+        cleaned = re.sub(r"\bFINISHED\b", "", cleaned)
+        # 去除清洗产生的多余空白（保留换行）
+        cleaned = re.sub(r"[ \t]{2,}", " ", cleaned)
+        return cleaned
     
     def reset(self):
         """重置状态"""

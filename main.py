@@ -314,10 +314,14 @@ if __name__ == "__main__":
     print("  BROWSER_PORT=9222         # 浏览器端口")
     print("=" * 60 + "\n")
 
-    uvicorn.run(
-        app,
-        host=AppConfig.get_host(),
-        port=AppConfig.get_port(),
-        log_level="warning",  # 隐藏 uvicorn 的 INFO 日志
-        access_log=False
-    )
+    try:
+        uvicorn.run(
+            app,
+            host=AppConfig.get_host(),
+            port=AppConfig.get_port(),
+            log_level="warning",  # 隐藏 uvicorn 的 INFO 日志
+            access_log=False
+        )
+    except KeyboardInterrupt:
+        # Ctrl+C 正常退出，避免打印冗长 traceback
+        sys.exit(0)
