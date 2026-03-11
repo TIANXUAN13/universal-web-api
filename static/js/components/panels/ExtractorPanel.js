@@ -4,16 +4,25 @@ window.ExtractorPanel = {
     name: 'ExtractorPanel',
     props: {
         extractorId: { type: String, default: null },
-        extractorVerified: { type: Boolean, default: false }
+        extractorVerified: { type: Boolean, default: false },
+        collapsed: { type: Boolean, default: true }
+    },
+    emits: ['update:collapsed'],
+    methods: {
+        toggle() {
+            this.$emit('update:collapsed', !this.collapsed);
+        }
     },
     template: `
         <div class="bg-white dark:bg-gray-800 border dark:border-gray-700 rounded-lg shadow-sm">
-            <div class="px-4 py-3 border-b dark:border-gray-700 flex justify-between items-center">
+            <div class="px-4 py-3 border-b dark:border-gray-700 flex justify-between items-center cursor-pointer hover:bg-gray-50 dark:hover:bg-gray-700/50 transition-colors"
+                 @click="toggle">
                 <div class="flex items-center gap-2">
+                    <span class="w-4 inline-flex justify-center text-gray-500 dark:text-gray-400" v-html="collapsed ? $icons.chevronDown : $icons.chevronUp"></span>
                     <h3 class="font-semibold text-gray-900 dark:text-white">🧩 提取器</h3>
                 </div>
             </div>
-            <div class="p-4">
+            <div v-show="!collapsed" class="p-4">
                 <div class="flex items-center justify-between">
                     <div>
                         <div class="text-sm text-gray-600 dark:text-gray-300">
@@ -38,3 +47,4 @@ window.ExtractorPanel = {
         </div>
     `
 };
+

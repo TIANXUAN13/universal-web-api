@@ -293,7 +293,38 @@ class SelectorValidator:
 # ================= AI 分析器 =================
 
 class AIAnalyzer:
-    """AI 页面分析器"""
+    """AI 页面分析器（支持 OpenAI 兼容 / Gemini 官方 / Claude 官方）"""
+    
+    # ===== Provider 注册表 =====
+    # 每个 provider 定义如何构建请求和解析响应
+    # 新增 provider 只需在此处注册，无需修改其他逻辑
+    PROVIDERS = {
+        "openai": {
+            "build_url":      "_build_url_openai",
+            "build_headers":  "_build_headers_openai",
+            "build_body":     "_build_body_openai",
+            "parse_response": "_parse_response_openai",
+        },
+        "gemini": {
+            "build_url":      "_build_url_gemini",
+            "build_headers":  "_build_headers_gemini",
+            "build_body":     "_build_body_gemini",
+            "parse_response": "_parse_response_gemini",
+        },
+        "claude": {
+            "build_url":      "_build_url_claude",
+            "build_headers":  "_build_headers_claude",
+            "build_body":     "_build_body_claude",
+            "parse_response": "_parse_response_claude",
+        },
+    }
+    
+    # URL 关键词 → provider 类型的映射（用于自动检测）
+    URL_PROVIDER_HINTS = [
+        ("generativelanguage.googleapis.com", "gemini"),
+        ("api.anthropic.com",                 "claude"),
+        ("openai.azure.com",                  "azure"),  # 未来可扩展
+    ]
     
     def __init__(self, global_config: GlobalConfigManager = None):
         self.api_key = AppConfig.get_helper_api_key()
@@ -304,10 +335,19 @@ class AIAnalyzer:
         self.model = AppConfig.get_helper_model()
         self.global_config = global_config
         
+        # 确定 provider 类型
+        configured_provider = AppConfig.get_helper_api_provider()
+        if configured_provider == "auto" or configured_provider not in self.PROVIDERS:
+            self.provider = self._detect_provider(self.base_url)
+        else:
+            self.provider = configured_provider
+        
         if not self.api_key:
             logger.warning("⚠️  未配置 HELPER_API_KEY，AI 分析功能将不可用")
         else:
-            logger.debug(f"AI 分析器已配置: URL={self.base_url}, Model={self.model}")
+            logger.debug(f"AI 分析器已配置: Provider={self.provider}, URL={self.base_url}, Model={self.model}")
+    
+    # ================= 公共接口 =================
     
     def analyze(self, html: str) -> Optional[Dict[str, str]]:
         """分析 HTML 并返回选择器"""
@@ -319,7 +359,7 @@ class AIAnalyzer:
         
         for attempt in range(AI_MAX_RETRIES):
             try:
-                logger.info(f"正在请求 AI 分析（尝试 {attempt + 1}/{AI_MAX_RETRIES}）...")
+                logger.info(f"正在请求 AI 分析（尝试 {attempt + 1}/{AI_MAX_RETRIES}，Provider: {self.provider}）...")
                 
                 response = self._request_ai(prompt)
                 if response:
@@ -347,23 +387,41 @@ class AIAnalyzer:
         logger.error("❌ AI 分析失败（已达最大重试次数）")
         return None
     
+    # ================= Provider 自动检测 =================
+    
+    def _detect_provider(self, base_url: str) -> str:
+        """根据 URL 自动推断 API 类型"""
+        if not base_url:
+            return "openai"
+        
+        url_lower = base_url.lower()
+        for keyword, provider in self.URL_PROVIDER_HINTS:
+            if keyword in url_lower:
+                logger.info(f"自动检测到 API 类型: {provider}（基于 URL 包含 '{keyword}'）")
+                return provider
+        
+        # 默认回退到 OpenAI 兼容格式
+        return "openai"
+    
+    # ================= 统一请求调度 =================
+    
     def _request_ai(self, prompt: str) -> Optional[str]:
-        """向 AI API 发送请求"""
-        url = f"{self.base_url}/chat/completions"
-        headers = {
-            "Content-Type": "application/json",
-            "Authorization": f"Bearer {self.api_key}",
-        }
-        data = {
-            "model": self.model,
-            "messages": [{"role": "user", "content": prompt}],
-            "temperature": 0.1
-        }
+        """向 AI API 发送请求（根据 provider 自动适配格式）"""
+        provider_config = self.PROVIDERS.get(self.provider)
+        if not provider_config:
+            logger.error(f"未知的 Provider: {self.provider}，回退到 openai")
+            provider_config = self.PROVIDERS["openai"]
+        
+        # 通过注册表动态调用对应的构建/解析方法
+        url = getattr(self, provider_config["build_url"])(prompt)
+        headers = getattr(self, provider_config["build_headers"])()
+        body = getattr(self, provider_config["build_body"])(prompt)
+        parse_fn = getattr(self, provider_config["parse_response"])
         
         try:
             req = request.Request(
                 url,
-                data=json.dumps(data).encode('utf-8'),
+                data=json.dumps(body).encode('utf-8'),
                 headers=headers
             )
             
@@ -372,22 +430,144 @@ class AIAnalyzer:
             
             try:
                 json_resp = json.loads(response_text)
-                if "choices" in json_resp and len(json_resp['choices']) > 0:
-                    return json_resp['choices'][0]['message']['content']
+                return parse_fn(json_resp)
             except json.JSONDecodeError:
-                logger.error("AI 响应解析失败")
-            
-            return None
+                logger.error(f"AI 响应 JSON 解析失败，原始响应前 500 字符: {response_text[:500]}")
+                return None
         
         except error.HTTPError as e:
-            logger.error(f"HTTP 错误 {e.code}: {e.reason}")
+            error_body = ""
+            try:
+                error_body = e.read().decode('utf-8')[:500]
+            except Exception:
+                pass
+            logger.error(f"HTTP 错误 {e.code}: {e.reason}" + (f"，响应: {error_body}" if error_body else ""))
             return None
         except error.URLError as e:
             logger.error(f"网络错误: {e.reason}")
             return None
-        except TimeoutError:
-            logger.error("请求超时")
+        except Exception as e:
+            # 兜底：捕获 socket.timeout 等未被上层覆盖的异常
+            logger.error(f"请求异常: {type(e).__name__}: {e}")
             return None
+    
+    # ================= OpenAI 兼容格式 =================
+    
+    def _build_url_openai(self, prompt: str) -> str:
+        return f"{self.base_url}/chat/completions"
+    
+    def _build_headers_openai(self) -> Dict[str, str]:
+        return {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {self.api_key}",
+        }
+    
+    def _build_body_openai(self, prompt: str) -> Dict:
+        return {
+            "model": self.model,
+            "messages": [{"role": "user", "content": prompt}],
+            "temperature": 0.1,
+        }
+    
+    def _parse_response_openai(self, json_resp: Dict) -> Optional[str]:
+        try:
+            if "choices" in json_resp and len(json_resp["choices"]) > 0:
+                return json_resp["choices"][0]["message"]["content"]
+        except (KeyError, IndexError, TypeError) as e:
+            logger.error(f"OpenAI 响应解析失败: {e}")
+        return None
+    
+    # ================= Gemini 官方格式 =================
+    
+    def _build_url_gemini(self, prompt: str) -> str:
+        # Gemini 官方 API: base_url 应为 https://generativelanguage.googleapis.com
+        # 完整端点: /v1beta/models/{model}:generateContent?key={api_key}
+        base = self.base_url.rstrip('/')
+        # 如果用户配置的 base_url 已经包含 /v1beta 或 /v1，不再追加
+        if "/v1beta" not in base and "/v1/" not in base:
+            base = f"{base}/v1beta"
+        return f"{base}/models/{self.model}:generateContent?key={self.api_key}"
+    
+    def _build_headers_gemini(self) -> Dict[str, str]:
+        # Gemini 官方通过 URL 参数传递 key，不需要 Authorization 头
+        return {
+            "Content-Type": "application/json",
+        }
+    
+    def _build_body_gemini(self, prompt: str) -> Dict:
+        return {
+            "contents": [
+                {
+                    "parts": [
+                        {"text": prompt}
+                    ]
+                }
+            ],
+            "generationConfig": {
+                "temperature": 0.1,
+            },
+        }
+    
+    def _parse_response_gemini(self, json_resp: Dict) -> Optional[str]:
+        try:
+            candidates = json_resp.get("candidates", [])
+            if candidates:
+                parts = candidates[0].get("content", {}).get("parts", [])
+                if parts:
+                    return parts[0].get("text")
+        except (KeyError, IndexError, TypeError) as e:
+            logger.error(f"Gemini 响应解析失败: {e}")
+        
+        # 检查是否有错误信息
+        if "error" in json_resp:
+            err = json_resp["error"]
+            logger.error(f"Gemini API 错误: [{err.get('code')}] {err.get('message', '')}")
+        
+        return None
+    
+    # ================= Claude 官方格式 =================
+    
+    def _build_url_claude(self, prompt: str) -> str:
+        base = self.base_url.rstrip('/')
+        # Claude 官方端点: /v1/messages
+        if not base.endswith("/v1"):
+            base = f"{base}/v1"
+        return f"{base}/messages"
+    
+    def _build_headers_claude(self) -> Dict[str, str]:
+        return {
+            "Content-Type": "application/json",
+            "x-api-key": self.api_key,
+            "anthropic-version": "2023-06-01",
+        }
+    
+    def _build_body_claude(self, prompt: str) -> Dict:
+        return {
+            "model": self.model,
+            "max_tokens": 4096,
+            "messages": [{"role": "user", "content": prompt}],
+            "temperature": 0.1,
+        }
+    
+    def _parse_response_claude(self, json_resp: Dict) -> Optional[str]:
+        try:
+            content = json_resp.get("content", [])
+            if content:
+                # Claude 响应的 content 是列表，每项有 type 和 text
+                text_parts = [block["text"] for block in content if block.get("type") == "text"]
+                if text_parts:
+                    return "\n".join(text_parts)
+        except (KeyError, IndexError, TypeError) as e:
+            logger.error(f"Claude 响应解析失败: {e}")
+        
+        # 检查是否有错误信息
+        if "error" in json_resp:
+            err = json_resp["error"]
+            logger.error(f"Claude API 错误: [{err.get('type')}] {err.get('message', '')}")
+        
+        return None
+    
+    # ================= Prompt 构建（不变）=================
     
     def _build_prompt(self, clean_html: str) -> str:
         """构建 AI 提示词（动态版）"""
@@ -439,6 +619,8 @@ class AIAnalyzer:
 - `send_btn`: The send button
 - `result_container`: AI response container
 - `new_chat_btn`: New chat button (or null)"""
+    
+    # ================= JSON 提取（不变）=================
     
     def _extract_json(self, text: str) -> Optional[Dict]:
         """从 AI 响应中提取 JSON"""

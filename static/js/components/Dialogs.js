@@ -5,26 +5,56 @@ window.JsonPreviewDialog = {
     name: 'JsonPreviewDialog',
     props: {
         show: { type: Boolean, default: false },
-        jsonData: { type: Object, default: () => ({}) }
+        jsonData: { type: Object, default: () => ({}) },
+        title: { type: String, default: '配置 JSON' }
     },
-    emits: ['close', 'copy'],
+    emits: ['close', 'copy', 'save'],
+    data() {
+        return {
+            draft: ''
+        };
+    },
+    watch: {
+        show: {
+            handler(value) {
+                if (value) {
+                    this.draft = JSON.stringify(this.jsonData || {}, null, 2);
+                }
+            },
+            immediate: true
+        },
+        jsonData: {
+            handler() {
+                if (this.show) {
+                    this.draft = JSON.stringify(this.jsonData || {}, null, 2);
+                }
+            },
+            deep: true
+        }
+    },
     template: `
         <div v-if="show"
              class="fixed inset-0 bg-black/50 flex items-center justify-center z-40"
              @click.self="$emit('close')">
-            <div class="bg-white dark:bg-gray-800 rounded-lg p-6 w-2/3 max-h-[80vh] flex flex-col">
+            <div class="bg-white dark:bg-gray-800 rounded-lg p-6 w-[96vw] max-w-[1600px] h-[90vh] flex flex-col shadow-2xl">
                 <div class="flex justify-between items-center mb-4">
-                    <h3 class="font-semibold dark:text-white">配置 JSON</h3>
+                    <h3 class="font-semibold dark:text-white">{{ title }}</h3>
                     <button @click="$emit('close')" 
                             class="text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-300">
                         <span v-html="$icons.xMark"></span>
                     </button>
                 </div>
-                <pre class="flex-1 overflow-auto bg-gray-50 dark:bg-gray-900 p-4 rounded text-sm font-mono border dark:border-gray-700 dark:text-gray-300">{{ JSON.stringify(jsonData, null, 2) }}</pre>
-                <div class="mt-4 flex justify-end">
-                    <button @click="$emit('copy')" 
+                <textarea v-model="draft"
+                          spellcheck="false"
+                          class="flex-1 min-h-0 overflow-auto bg-gray-50 dark:bg-gray-900 p-4 rounded text-sm font-mono border dark:border-gray-700 dark:text-gray-300 resize-none focus:outline-none focus:ring-2 focus:ring-blue-400"></textarea>
+                <div class="mt-4 flex justify-end gap-2">
+                    <button @click="$emit('copy', draft)" 
                             class="border dark:border-gray-700 rounded hover:bg-gray-100 dark:hover:bg-gray-700 dark:text-white transition-colors px-2 py-0.5 text-sm">
                         复制到剪贴板
+                    </button>
+                    <button @click="$emit('save', draft)" 
+                            class="border rounded transition-colors bg-blue-500 text-white hover:bg-blue-600 border-blue-500 px-3 py-1 text-sm">
+                        保存修改
                     </button>
                 </div>
             </div>

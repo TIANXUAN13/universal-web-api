@@ -4,23 +4,25 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Universal Web-to-API Dashboard</title>
-    
+
     <!-- 外部依赖 -->
-    <script src="https://cdn.tailwindcss.com"></script>
-    <script src="https://cdn.staticfile.org/vue/3.3.4/vue.global.prod.min.js"></script>
-    
+
     <!-- Tailwind 配置 -->
-    <script>
-        tailwind.config = { darkMode: 'class' }
-    </script>
-    
+
     <!-- 自定义样式 -->
     <link rel="stylesheet" href="/static/css/dashboard.css">
-    
+    <link rel="icon" href="data:,">
+
     <!-- 图标定义 -->
-    <script src="/static/js/icons.js"></script>
 </head>
 <body class="bg-gray-50 dark:bg-gray-900 transition-colors duration-300 h-screen overflow-hidden">
+    <div id="app-shell" class="app-shell" style="position:fixed;inset:0;display:flex;align-items:center;justify-content:center;padding:24px;background:radial-gradient(circle at top, rgba(59,130,246,.16), transparent 38%), linear-gradient(180deg, #111827 0%, #0f172a 100%);z-index:9999;">
+        <div class="app-shell-card" style="width:min(480px,100%);padding:28px;border:1px solid rgba(148,163,184,.24);border-radius:18px;background:rgba(15,23,42,.88);box-shadow:0 20px 50px rgba(0,0,0,.35);color:#e5eefc;text-align:center;">
+            <div class="app-shell-title">控制面板加载中</div>
+            <p class="app-shell-text">正在加载前端资源和配置。如果停留太久，通常是外部 CDN 响应慢。</p>
+            <button type="button" class="app-shell-button" onclick="window.location.reload()">重新加载</button>
+        </div>
+    </div>
     <div id="app" class="flex h-full overflow-hidden" v-cloak @click="closeAllMenus">
 
         <!-- 隐藏的文件输入框 -->
@@ -72,9 +74,9 @@
                     <div class="flex items-center gap-4">
                         <h2 class="text-xl font-bold dark:text-white">{{ currentDomain }}</h2>
                         <label v-if="getActivePresetConfig()" class="flex items-center text-sm cursor-pointer dark:text-gray-300">
-                            <input type="checkbox" 
-                                   :checked="getActivePresetConfig().stealth" 
-                                   @change="getActivePresetConfig().stealth = $event.target.checked" 
+                            <input type="checkbox"
+                                   :checked="getActivePresetConfig().stealth"
+                                   @change="getActivePresetConfig().stealth = $event.target.checked"
                                    class="mr-2">
                             <span>隐身模式</span>
                         </label>
@@ -173,6 +175,13 @@
                     <span v-html="$icons.chartBar"></span> 日志
                     <span v-if="logs.length > 0" class="ml-1 px-1.5 py-0.5 text-xs bg-blue-100 dark:bg-blue-900 text-blue-600 dark:text-blue-300 rounded-full">{{ logs.length }}</span>
                 </button>
+                <button @click="activeTab = 'commands'"
+                        :class="['px-4 py-2 text-sm font-medium border-b-2 transition-colors',
+                                 activeTab === 'commands'
+                                 ? 'border-blue-500 text-blue-600 dark:text-blue-400'
+                                 : 'border-transparent text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-300']">
+                    ⚡ 命令
+                </button>
                 <button @click="activeTab = 'settings'"
                         :class="['px-4 py-2 text-sm font-medium border-b-2 transition-colors',
                                  activeTab === 'settings'
@@ -222,7 +231,11 @@
                                @open-verify-dialog="openVerifyDialog"
                                @refresh="loadExtractors">
                 </extractor-tab>
-
+                <!-- 命令 Tab -->
+                <commands-tab v-show="activeTab === 'commands'"
+                              :dark-mode="darkMode"
+                              @notify="notify($event.message, $event.type)">
+                </commands-tab>
                 <!-- 日志 Tab -->
                 <logs-tab v-show="activeTab === 'logs'"
                           :logs="logs"
@@ -267,9 +280,11 @@
 
         <!-- 弹窗区域 -->
         <json-preview-dialog :show="showJsonPreview"
-                             :json-data="sites[currentDomain] || {}"
+                             :json-data="getJsonPreviewData()"
+                             :title="'配置 JSON · ' + getActivePresetName()"
                              @close="showJsonPreview = false"
-                             @copy="copyJson">
+                             @copy="copyJson"
+                             @save="saveJsonPreview">
         </json-preview-dialog>
 
         <token-dialog :show="showTokenDialog"
@@ -316,6 +331,12 @@
     </div>
 
     <!-- 加载组件 JS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script>
+        tailwind.config = { darkMode: 'class' }
+    </script>
+    <script src="https://cdn.staticfile.org/vue/3.3.4/vue.global.js"></script>
+    <script src="/static/js/icons.js"></script>
     <script src="/static/js/components/Sidebar.js"></script>
     <!-- 子组件（在 ConfigTab 之前） -->
     <script src="static/js/components/panels/SelectorPanel.js"></script>
@@ -332,6 +353,10 @@
     <script src="/static/js/components/ExtractorTab.js"></script>
     <script src="/static/js/components/Dialogs.js"></script>
     <script src="/static/js/components/TabPoolTab.js"></script>
+    <script src="/static/js/components/commands/CommandsTabComputed.js"></script>
+    <script src="/static/js/components/commands/CommandsTabMethods.js"></script>
+    <script src="/static/js/components/commands/CommandsTabTemplate.js"></script>
+    <script src="/static/js/components/CommandsTab.js"></script>
 
     <!-- 主应用逻辑 -->
     <script src="/static/js/dashboard.js"></script>

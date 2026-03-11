@@ -36,6 +36,7 @@ class ConfigConstants:
     """配置引擎常量"""
     _PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
     CONFIG_FILE = os.getenv("SITES_CONFIG_FILE", os.path.join(_PROJECT_ROOT, "config", "sites.json"))
+    COMMANDS_FILE = os.getenv("COMMANDS_CONFIG_FILE", os.path.join(_PROJECT_ROOT, "config", "commands.json"))
     IMAGE_PRESETS_FILE = os.path.join(_PROJECT_ROOT, "config", "image_presets.json")
     
     MAX_HTML_CHARS = int(os.getenv("MAX_HTML_CHARS", "120000"))
@@ -109,6 +110,7 @@ class ConfigEngine:
         
         # 加载配置
         self._load_config()
+        self._migrate_global_commands()
         
         # 处理器
         self.html_cleaner = HTMLCleaner()
@@ -242,6 +244,108 @@ class ConfigEngine:
             except Exception:
                 pass
             return False
+
+    def _load_commands_file(self) -> List[Dict[str, Any]]:
+        """加载独立命令配置文件"""
+        commands_file = ConfigConstants.COMMANDS_FILE
+        if not os.path.exists(commands_file):
+            return []
+
+        try:
+            with open(commands_file, "r", encoding="utf-8") as f:
+                data = json.load(f)
+
+            if isinstance(data, dict):
+                data = data.get("commands", [])
+
+            if isinstance(data, list):
+                return data
+
+            logger.warning(f"命令配置文件格式无效: {commands_file}")
+            return []
+        except json.JSONDecodeError as e:
+            logger.error(f"命令配置文件格式错误: {e}")
+            return []
+        except Exception as e:
+            logger.error(f"加载命令配置失败: {e}")
+            return []
+
+    def _save_commands_file(self, commands: List[Dict[str, Any]]) -> bool:
+        """保存独立命令配置文件"""
+        commands_file = ConfigConstants.COMMANDS_FILE
+        tmp_file = commands_file + ".tmp"
+
+        try:
+            os.makedirs(os.path.dirname(commands_file), exist_ok=True)
+            payload = {"commands": commands}
+
+            with open(tmp_file, "w", encoding="utf-8") as f:
+                json.dump(payload, f, indent=2, ensure_ascii=False)
+                f.flush()
+                os.fsync(f.fileno())
+
+            os.replace(tmp_file, commands_file)
+            logger.info(f"命令配置已保存: {commands_file}")
+            return True
+        except Exception as e:
+            logger.error(f"保存命令配置失败: {e}")
+            try:
+                if os.path.exists(tmp_file):
+                    os.remove(tmp_file)
+            except Exception:
+                pass
+            return False
+
+    @staticmethod
+    def _merge_commands(existing: List[Dict[str, Any]], incoming: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """保留已有命令，仅追加不存在的命令"""
+        merged = list(existing or [])
+        seen_ids = {
+            str(cmd.get("id", "")).strip()
+            for cmd in merged
+            if isinstance(cmd, dict) and str(cmd.get("id", "")).strip()
+        }
+        seen_names = {
+            str(cmd.get("name", "")).strip()
+            for cmd in merged
+            if isinstance(cmd, dict) and str(cmd.get("name", "")).strip()
+        }
+
+        for cmd in incoming or []:
+            if not isinstance(cmd, dict):
+                continue
+
+            command_id = str(cmd.get("id", "")).strip()
+            command_name = str(cmd.get("name", "")).strip()
+
+            if command_id and command_id in seen_ids:
+                continue
+            if command_name and command_name in seen_names:
+                continue
+
+            merged.append(cmd)
+            if command_id:
+                seen_ids.add(command_id)
+            if command_name:
+                seen_names.add(command_name)
+
+        return merged
+
+    def _migrate_global_commands(self):
+        """将旧版 _global.commands 迁移到独立文件"""
+        legacy_commands = self.global_config.get("commands", [])
+        existing_commands = self._load_commands_file()
+
+        if not isinstance(legacy_commands, list):
+            legacy_commands = []
+
+        merged_commands = self._merge_commands(existing_commands, legacy_commands)
+
+        if legacy_commands or not os.path.exists(ConfigConstants.COMMANDS_FILE):
+            self._save_commands_file(merged_commands)
+
+        if self.global_config.remove("commands"):
+            self._save_config()
     # ================= 预设系统核心方法 =================
     
     def _migrate_to_presets(self):
@@ -276,6 +380,7 @@ class ConfigEngine:
             
             # 构建新格式
             self.sites[domain] = {
+                "default_preset": DEFAULT_PRESET_NAME,
                 "presets": {
                     DEFAULT_PRESET_NAME: preset_data
                 }
@@ -288,9 +393,6 @@ class ConfigEngine:
             self._save_config()
             logger.info(f"✅ 已迁移 {migrated_count} 个站点配置为预设格式")
     
-        if migrated_count > 0:
-            self._save_config()
-            logger.info(f"✅ 已迁移 {migrated_count} 个站点配置为预设格式")
     
     def _cleanup_preset_residuals(self):
         """
@@ -300,6 +402,7 @@ class ConfigEngine:
         这些残留通常由旧版 bug 或手动编辑产生。
         """
         cleaned_count = 0
+        default_fixed_count = 0
         
         for domain in list(self.sites.keys()):
             if domain.startswith('_'):
@@ -324,10 +427,58 @@ class ConfigEngine:
                 del site_config[key]
                 cleaned_count += 1
                 logger.debug(f"清理残留: {domain}.{key}")
-        
-        if cleaned_count > 0:
+
+            if self._normalize_site_default_preset(domain, site_config):
+                default_fixed_count += 1
+                logger.debug(f"修正默认预设: {domain} -> {site_config.get('default_preset')}")
+
+        if cleaned_count > 0 or default_fixed_count > 0:
             self._save_config()
-            logger.info(f"✅ 已清理 {cleaned_count} 个预设外残留字段")
+            logger.info(
+                f"✅ 已清理 {cleaned_count} 个预设外残留字段，"
+                f"修正 {default_fixed_count} 个站点默认预设"
+            )
+
+    def _resolve_default_preset_name(self, site: Dict[str, Any]) -> Optional[str]:
+        """解析站点有效默认预设名（不修改原对象）"""
+        presets = site.get("presets", {})
+        if not presets:
+            return None
+
+        configured_default = site.get("default_preset")
+        if isinstance(configured_default, str):
+            configured_default = configured_default.strip()
+        else:
+            configured_default = None
+
+        if configured_default and configured_default in presets:
+            return configured_default
+
+        if DEFAULT_PRESET_NAME in presets:
+            return DEFAULT_PRESET_NAME
+
+        return next(iter(presets))
+
+    def _normalize_site_default_preset(self, domain: str, site: Dict[str, Any]) -> bool:
+        """
+        规范化站点 default_preset 字段
+
+        Returns:
+            是否发生修改
+        """
+        resolved = self._resolve_default_preset_name(site)
+
+        if resolved is None:
+            if "default_preset" in site:
+                del site["default_preset"]
+                return True
+            return False
+
+        if site.get("default_preset") != resolved:
+            site["default_preset"] = resolved
+            return True
+
+        return False
     
     def _get_site_data(self, domain: str, preset_name: str = None) -> Optional[Dict]:
         """
@@ -354,18 +505,24 @@ class ConfigEngine:
         if not presets:
             return None
         
-        target = preset_name or DEFAULT_PRESET_NAME
-        
+        resolved_default = self._resolve_default_preset_name(site)
+        target = preset_name or resolved_default
+
         # 1. 尝试精确匹配
-        if target in presets:
+        if target and target in presets:
             return presets[target]
-        
-        # 2. 回退到默认预设
+
+        # 2. 回退到站点默认预设
+        if resolved_default and resolved_default in presets:
+            logger.debug(f"预设 '{target}' 不存在，回退到站点默认预设 '{resolved_default}'")
+            return presets[resolved_default]
+
+        # 3. 回退到主预设
         if DEFAULT_PRESET_NAME in presets:
             logger.debug(f"预设 '{target}' 不存在，回退到 '{DEFAULT_PRESET_NAME}'")
             return presets[DEFAULT_PRESET_NAME]
-        
-        # 3. 使用第一个可用预设
+
+        # 4. 使用第一个可用预设
         first_key = next(iter(presets))
         logger.warning(f"默认预设不存在，使用第一个预设: '{first_key}'")
         return presets[first_key]
@@ -387,6 +544,37 @@ class ConfigEngine:
         site = self.sites[domain]
         presets = site.get("presets", {})
         return list(presets.keys())
+
+    def get_default_preset(self, domain: str) -> Optional[str]:
+        """获取指定站点的默认预设名称（已解析回退）"""
+        self.refresh_if_changed()
+
+        site = self.sites.get(domain)
+        if not site:
+            return None
+
+        return self._resolve_default_preset_name(site)
+
+    def set_default_preset(self, domain: str, preset_name: str) -> bool:
+        """设置指定站点的默认预设"""
+        self.refresh_if_changed()
+
+        site = self.sites.get(domain)
+        if not site:
+            return False
+
+        presets = site.get("presets", {})
+        if preset_name not in presets:
+            logger.warning(f"默认预设设置失败，预设不存在: {domain}/{preset_name}")
+            return False
+
+        if site.get("default_preset") == preset_name:
+            return True
+
+        site["default_preset"] = preset_name
+        self._save_config()
+        logger.info(f"✅ 站点 {domain} 默认预设已设置为: '{preset_name}'")
+        return True
     
     def create_preset(self, domain: str, new_name: str, 
                       source_name: str = None) -> bool:
@@ -429,6 +617,7 @@ class ConfigEngine:
         
         # 深拷贝创建新预设
         presets[new_name] = copy.deepcopy(source_data)
+        self._normalize_site_default_preset(domain, site)
         self._save_config()
         
         logger.info(f"✅ 站点 {domain} 创建预设: '{new_name}' (克隆自 '{source}')")
@@ -462,6 +651,7 @@ class ConfigEngine:
             return False
         
         del presets[preset_name]
+        self._normalize_site_default_preset(domain, site)
         self._save_config()
         
         logger.info(f"✅ 站点 {domain} 删除预设: '{preset_name}'")
@@ -484,6 +674,8 @@ class ConfigEngine:
             logger.warning(f"预设名已存在: {new_name}")
             return False
         
+        default_preset = site.get("default_preset")
+
         # 保持顺序：创建有序副本
         new_presets = {}
         for key, value in presets.items():
@@ -491,8 +683,11 @@ class ConfigEngine:
                 new_presets[new_name] = value
             else:
                 new_presets[key] = value
-        
+
         site["presets"] = new_presets
+        if default_preset == old_name:
+            site["default_preset"] = new_name
+        self._normalize_site_default_preset(domain, site)
         self._save_config()
         
         logger.info(f"✅ 站点 {domain} 重命名预设: '{old_name}' → '{new_name}'")
@@ -581,7 +776,7 @@ class ConfigEngine:
             if changed:
                 self._save_config()
             
-            used_preset = preset_name or DEFAULT_PRESET_NAME
+            used_preset = preset_name or self.get_default_preset(domain) or DEFAULT_PRESET_NAME
             logger.debug(f"使用缓存配置: {domain} [预设: {used_preset}]")
             return copy.deepcopy(config)
         
@@ -607,6 +802,7 @@ class ConfigEngine:
             }
             
             self.sites[domain] = {
+                "default_preset": DEFAULT_PRESET_NAME,
                 "presets": {
                     DEFAULT_PRESET_NAME: new_preset
                 }
@@ -633,6 +829,7 @@ class ConfigEngine:
         }
         
         self.sites[domain] = {
+            "default_preset": DEFAULT_PRESET_NAME,
             "presets": {
                 DEFAULT_PRESET_NAME: fallback_preset
             }
@@ -818,7 +1015,7 @@ class ConfigEngine:
         return True
     
     def get_all_file_paste_configs(self) -> dict:
-        """获取所有站点的文件粘贴配置（使用各站点的主预设）"""
+        """获取所有站点的文件粘贴配置（使用各站点当前默认预设）"""
         self.refresh_if_changed()
         
         default_config = get_default_file_paste_config()

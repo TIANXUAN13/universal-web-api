@@ -9,6 +9,7 @@ app/core/tab_pool.py - 标签页池管理器 (v1.05)
 """
 
 import asyncio
+import os
 import threading
 import time
 from dataclasses import dataclass, field
@@ -16,7 +17,7 @@ from typing import Optional, Dict, List, Any
 from enum import Enum
 from contextlib import asynccontextmanager
 
-from app.core.config import logger
+from app.core.config import logger, BrowserConstants
 
 
 class TabStatus(Enum):
@@ -63,6 +64,8 @@ class TabSession:
                 "about:blank", 
                 "chrome://newtab/",
                 "chrome://new-tab-page/",
+                "devtools://",
+                "chrome-devtools://",
                 "chrome-error://",
                 "about:neterror"
             )
@@ -100,9 +103,26 @@ class TabSession:
             self.last_used_at = time.time()
             self.request_count += 1
             return True
-    
-    def release(self, clear_page: bool = False):
+
+    def acquire_for_command(self, task_id: str) -> bool:
+        """Acquire tab for command execution without incrementing request counter."""
         with self._lock:
+            if self.status != TabStatus.IDLE:
+                return False
+            self.status = TabStatus.BUSY
+            self.current_task_id = task_id
+            self.last_used_at = time.time()
+            return True
+    
+    def release(
+        self,
+        clear_page: bool = False,
+        check_triggers: bool = True,
+        rollback_request_count: bool = False
+    ):
+        with self._lock:
+            if rollback_request_count and self.request_count > 0:
+                self.request_count -= 1
             self.status = TabStatus.IDLE
             self.current_task_id = None
             self.last_used_at = time.time()
@@ -112,34 +132,53 @@ class TabSession:
                     self.tab.get("about:blank")
                     self.current_domain = None
                 except Exception as e:
-                    logger.debug(f"清空页面失败: {e}")
+                    logger.debug(f"clear page failed: {e}")
+        
+        # Trigger command checks outside the lock to avoid blocking
+        try:
+            from app.services.command_engine import command_engine
+            if check_triggers:
+                command_engine.check_triggers(self)
+        except Exception as e:
+            logger.debug(f"命令触发检查异常: {e}")
     
-    def force_release(self):
-        """强制释放（不管当前状态）- 修复版：尝试重置页面，失败则标记为 ERROR"""
-        # 先标记为 ERROR，防止被其他线程获取
+    def force_release(self, clear_page: bool = False, check_triggers: bool = False):
+        """Force release tab lock and optionally refresh current page."""
         with self._lock:
-            self.status = TabStatus.ERROR
+            self.status = TabStatus.IDLE
             self.current_task_id = None
             self.last_used_at = time.time()
-        
-        # 在锁外尝试重置页面（避免阻塞其他线程）
-        reset_success = False
+
         try:
-            self.tab.get("about:blank")
-            self.current_domain = None
-            reset_success = True
-        except Exception as e:
-            logger.warning(f"[{self.id}] 重置页面失败: {e}")
-        
-        # 根据重置结果更新状态
+            if hasattr(self.tab, "stop_loading"):
+                self.tab.stop_loading()
+            self.tab.run_js("if (window.stop) { window.stop(); }")
+        except Exception:
+            pass
+
+        reset_success = True
+        if clear_page:
+            try:
+                self.tab.refresh()
+            except Exception as e:
+                logger.warning(f"[{self.id}] force_release refresh failed: {e}")
+                reset_success = False
+
         with self._lock:
             if reset_success:
                 self.status = TabStatus.IDLE
-                logger.info(f"[{self.id}] 强制释放成功，已重置为空白页")
+                logger.info(f"[{self.id}] force_release done")
             else:
                 self.error_count += 1
-                logger.warning(f"[{self.id}] 强制释放失败，标记为 ERROR（将被移出池）")
-    
+                logger.warning(f"[{self.id}] force_release failed, set ERROR")
+
+        if check_triggers:
+            try:
+                from app.services.command_engine import command_engine
+                command_engine.check_triggers(self)
+            except Exception as e:
+                logger.debug(f"command trigger check failed: {e}")
+
     def activate(self) -> bool:
         """激活标签页（使其成为浏览器焦点）"""
         try:
@@ -180,6 +219,187 @@ class TabSession:
             return ""
 
 
+@dataclass
+class _GlobalNetworkWorker:
+    """单个标签页的全局网络监听工作线程。"""
+    session_id: str
+    thread: threading.Thread
+    stop_event: threading.Event
+
+
+class _GlobalNetworkInterceptionManager:
+    """
+    全局常驻网络事件监听（仅负责把事件上报给 CommandEngine）。
+
+    设计要点：
+    - 仅在标签页空闲时运行；
+    - 标签页被任务占用时暂停，让位给工作流内监听器；
+    - 事件命中逻辑仍由 CommandEngine 决定。
+    """
+
+    def __init__(
+        self,
+        get_session_fn,
+        is_shutdown_fn,
+        listen_pattern: str = "http",
+        wait_timeout: float = 0.5,
+        retry_delay: float = 1.0,
+    ):
+        self._get_session = get_session_fn
+        self._is_shutdown = is_shutdown_fn
+        self._listen_pattern = str(listen_pattern or "http").strip() or "http"
+        self._wait_timeout = max(0.1, float(wait_timeout or 0.5))
+        self._retry_delay = max(0.2, float(retry_delay or 1.0))
+        self._workers: Dict[str, _GlobalNetworkWorker] = {}
+        self._lock = threading.RLock()
+
+    @staticmethod
+    def _extract_event(response: Any) -> Dict[str, Any]:
+        req = getattr(response, "request", None)
+        resp = getattr(response, "response", None)
+
+        url = (
+            getattr(req, "url", None)
+            or getattr(resp, "url", None)
+            or getattr(response, "url", None)
+            or ""
+        )
+        method = (
+            getattr(req, "method", None)
+            or getattr(response, "method", None)
+            or ""
+        )
+        status = (
+            getattr(resp, "status", None)
+            or getattr(resp, "status_code", None)
+            or getattr(response, "status", None)
+            or 0
+        )
+
+        try:
+            status = int(status)
+        except Exception:
+            status = 0
+
+        return {
+            "url": str(url or ""),
+            "method": str(method or "").upper(),
+            "status": status,
+            "timestamp": time.time(),
+        }
+
+    @staticmethod
+    def _safe_stop_listen(tab: Any):
+        try:
+            if hasattr(tab, "listen") and getattr(tab.listen, "listening", False):
+                tab.listen.stop()
+        except Exception:
+            pass
+
+    def _dispatch_event(self, session: TabSession, event: Dict[str, Any]):
+        try:
+            from app.services.command_engine import command_engine
+            command_engine.handle_network_event(session, event)
+        except Exception as e:
+            logger.debug(f"[GlobalNet] 事件上报失败（忽略）: {e}")
+
+    def start_for_session(self, session: TabSession):
+        if not session:
+            return
+        with self._lock:
+            existing = self._workers.get(session.id)
+            if existing and existing.thread.is_alive():
+                return
+
+            stop_event = threading.Event()
+            thread = threading.Thread(
+                target=self._worker_loop,
+                args=(session.id, stop_event),
+                daemon=True,
+                name=f"global-net-{session.id}",
+            )
+            self._workers[session.id] = _GlobalNetworkWorker(
+                session_id=session.id,
+                thread=thread,
+                stop_event=stop_event,
+            )
+            thread.start()
+            logger.debug(f"[GlobalNet] 启动监听: {session.id} pattern={self._listen_pattern!r}")
+
+    def stop_for_session(self, session_id: str, reason: str = ""):
+        if not session_id:
+            return
+
+        worker = None
+        with self._lock:
+            worker = self._workers.pop(session_id, None)
+        if not worker:
+            return
+
+        worker.stop_event.set()
+
+        session = self._get_session(session_id)
+        if session is not None:
+            self._safe_stop_listen(session.tab)
+
+        if reason:
+            logger.debug(f"[GlobalNet] 停止监听: {session_id} ({reason})")
+        else:
+            logger.debug(f"[GlobalNet] 停止监听: {session_id}")
+
+    def shutdown(self):
+        with self._lock:
+            session_ids = list(self._workers.keys())
+        for session_id in session_ids:
+            self.stop_for_session(session_id, reason="shutdown")
+        logger.info("[GlobalNet] 全局网络监听已关闭")
+
+    def _worker_loop(self, session_id: str, stop_event: threading.Event):
+        tab = None
+        listening = False
+
+        try:
+            while not stop_event.is_set():
+                if self._is_shutdown():
+                    break
+
+                session = self._get_session(session_id)
+                if session is None:
+                    break
+
+                tab = session.tab
+
+                if not listening:
+                    try:
+                        # 复用连接，降低对 CDP session 的额外占用
+                        tab.listen._reuse_driver = True
+                        tab.listen.start(self._listen_pattern)
+                        listening = True
+                    except Exception as e:
+                        logger.debug(f"[GlobalNet] 启动监听失败: {session_id}, err={e}")
+                        time.sleep(self._retry_delay)
+                        continue
+
+                try:
+                    response = tab.listen.wait(timeout=self._wait_timeout)
+                except Exception as e:
+                    logger.debug(f"[GlobalNet] wait 异常: {session_id}, err={e}")
+                    listening = False
+                    self._safe_stop_listen(tab)
+                    time.sleep(self._retry_delay)
+                    continue
+
+                if response is None or response is False:
+                    continue
+
+                event = self._extract_event(response)
+                self._dispatch_event(session, event)
+
+        finally:
+            if tab is not None:
+                self._safe_stop_listen(tab)
+
+
 class TabPoolManager:
     """标签页池管理器"""
     
@@ -203,6 +423,21 @@ class TabPoolManager:
     
     # 新标签页扫描间隔（秒）
     SCAN_INTERVAL = 10
+
+    @staticmethod
+    def _to_bool(value: Any, default: bool = False) -> bool:
+        if isinstance(value, bool):
+            return value
+        if value is None:
+            return default
+        return str(value).strip().lower() in {"1", "true", "yes", "y", "on"}
+
+    @staticmethod
+    def _to_float(value: Any, default: float) -> float:
+        try:
+            return float(value)
+        except Exception:
+            return default
     
     def __init__(
         self,
@@ -232,13 +467,74 @@ class TabPoolManager:
         self._known_tab_ids: set = set()
         # 🆕 记录当前活动的标签页 ID（避免重复激活）
         self._active_session_id: Optional[str] = None
+        self._auto_activate_on_acquire = self._to_bool(
+            os.getenv("TAB_AUTO_ACTIVATE_ON_ACQUIRE"), False
+        )
         
         # 🆕 持久化编号系统
         self._next_persistent_index: int = 1  # 下一个可分配的编号
         self._raw_id_to_persistent: Dict[str, int] = {}  # raw_tab_id → persistent_index
         self._persistent_to_session_id: Dict[int, str] = {}  # persistent_index → session.id
-        
+
+        # 全局常驻网络监听（可配置）
+        self._global_network_enabled = self._to_bool(
+            BrowserConstants.get("GLOBAL_NETWORK_INTERCEPTION_ENABLED"), False
+        )
+        self._global_network_listen_pattern = str(
+            BrowserConstants.get("GLOBAL_NETWORK_INTERCEPTION_LISTEN_PATTERN") or "http"
+        ).strip() or "http"
+        self._global_network_wait_timeout = max(
+            0.1,
+            self._to_float(BrowserConstants.get("GLOBAL_NETWORK_INTERCEPTION_WAIT_TIMEOUT"), 0.5),
+        )
+        self._global_network_retry_delay = max(
+            0.2,
+            self._to_float(BrowserConstants.get("GLOBAL_NETWORK_INTERCEPTION_RETRY_DELAY"), 1.0),
+        )
+        self._global_network_monitor: Optional[_GlobalNetworkInterceptionManager] = None
+        if self._global_network_enabled:
+            self._global_network_monitor = _GlobalNetworkInterceptionManager(
+                get_session_fn=self._get_session_for_monitor,
+                is_shutdown_fn=lambda: self._shutdown,
+                listen_pattern=self._global_network_listen_pattern,
+                wait_timeout=self._global_network_wait_timeout,
+                retry_delay=self._global_network_retry_delay,
+            )
+
         logger.debug(f"TabPoolManager 初始化 (max={max_tabs})")
+
+    def _get_session_for_monitor(self, session_id: str) -> Optional[TabSession]:
+        with self._lock:
+            return self._tabs.get(session_id)
+
+    def _start_global_monitor_for_session(self, session: Optional[TabSession]):
+        if not session or not self._global_network_monitor:
+            return
+        if self._shutdown:
+            return
+        # 仅在空闲标签页常驻监听，任务执行时让位
+        if session.status != TabStatus.IDLE:
+            return
+        self._global_network_monitor.start_for_session(session)
+
+    def _stop_global_monitor_for_session(self, session_id: str, reason: str = ""):
+        if not self._global_network_monitor:
+            return
+        self._global_network_monitor.stop_for_session(session_id, reason=reason)
+
+    def suspend_global_network_monitor(self, tab_id: str, reason: str = "manual"):
+        with self._lock:
+            self._stop_global_monitor_for_session(tab_id, reason=reason)
+
+    def resume_global_network_monitor(self, tab_id: str, reason: str = "manual"):
+        with self._lock:
+            session = self._tabs.get(tab_id)
+            if not session:
+                return
+            if session.status != TabStatus.IDLE or not session.is_healthy():
+                return
+            self._start_global_monitor_for_session(session)
+            logger.debug(f"[GlobalNet] 恢复监听: {tab_id} ({reason})")
         
     def _get_domain_abbr(self, url: str) -> str:
         try:
@@ -327,6 +623,7 @@ class TabPoolManager:
                 else:
                     logger.info(f"[{session_id}] 标签页已关闭，从池中移除")
                     del self._tabs[session_id]
+                self._stop_global_monitor_for_session(session_id, reason="tab_closed")
                 
                 # 清理映射
                 self._known_tab_ids.discard(raw_id)
@@ -347,6 +644,7 @@ class TabPoolManager:
             # ===== 第三步：扫描新标签页 =====
             skip_urls = [
                 "chrome://", "chrome-error://", "about:blank",
+                "devtools://", "chrome-devtools://",
                 "edge://", "brave://",
             ]
             
@@ -377,10 +675,11 @@ class TabPoolManager:
                     # 有效页面 - 添加到池
                     session = self._wrap_tab(tab, raw_tab)
                     self._tabs[session.id] = session
+                    self._start_global_monitor_for_session(session)
                     new_count += 1
                     
                     display_url = url[:60] + "..." if len(url) > 60 else url
-                    logger.info(f"🆕 发现新标签页: {session.id} -> {display_url}")
+                    logger.debug(f"🆕 发现新标签页: {session.id} -> {display_url}")
                     
                 except Exception as e:
                     logger.debug(f"处理标签页出错: {e}")
@@ -402,6 +701,7 @@ class TabPoolManager:
             
             skip_urls = [
                 "chrome://", "chrome-error://", "about:blank",
+                "devtools://", "chrome-devtools://",
                 "edge://", "brave://",
             ]
             
@@ -445,6 +745,7 @@ class TabPoolManager:
             for session in self._tabs.values():
                 session.status = TabStatus.IDLE
                 session.current_task_id = None
+                self._start_global_monitor_for_session(session)
             
             self._initialized = True
             self._last_scan_time = time.time()
@@ -459,11 +760,19 @@ class TabPoolManager:
                 busy_duration = now - session.last_used_at
                 
                 if busy_duration > self.STUCK_TIMEOUT:
+                    task_id = session.current_task_id or ""
+                    cancelled = False
+                    if task_id:
+                        try:
+                            from app.services.request_manager import request_manager
+                            cancelled = bool(request_manager.cancel_request(task_id, "stuck_timeout"))
+                        except Exception as e:
+                            logger.debug(f"[{session.id}] stuck cancel failed (ignored): {e}")
                     logger.warning(
-                        f"[{session.id}] 卡死 {busy_duration:.0f}s，强制释放 "
-                        f"(任务: {session.current_task_id})"
+                        f"[{session.id}] stuck for {busy_duration:.0f}s, force release "
+                        f"(task={task_id or '-'}, cancelled={cancelled})"
                     )
-                    session.force_release()
+                    session.force_release(clear_page=False, check_triggers=False)
     
     def _cleanup_unhealthy_tabs(self):
         """清理不健康的空闲标签页和错误状态的标签页"""
@@ -480,6 +789,7 @@ class TabPoolManager:
         for tab_id in to_remove:
             session = self._tabs[tab_id]
             logger.warning(f"[{tab_id}] 不健康或错误状态，从池中移除")
+            self._stop_global_monitor_for_session(tab_id, reason="unhealthy")
             
             # 清理映射表，允许相同 raw_tab_id 被重新扫描
             raw_ids_to_remove = [
@@ -501,6 +811,19 @@ class TabPoolManager:
             
             del self._tabs[tab_id]
     
+    def _should_defer_to_command(self, session: TabSession, task_id: str) -> bool:
+        """Whether request acquisition should defer to high-priority pending/running commands."""
+        task = str(task_id or "").strip().lower()
+        if task.startswith("cmd_") or task.startswith("group_"):
+            return False
+        try:
+            from app.services.command_engine import command_engine
+            if hasattr(command_engine, "should_block_request_for_session"):
+                return bool(command_engine.should_block_request_for_session(session, task_id=task_id))
+        except Exception:
+            return False
+        return False
+
     def acquire(self, task_id: str, timeout: float = None) -> Optional[TabSession]:
         """获取一个可用的标签页（增强版）"""
         timeout = timeout or self.acquire_timeout
@@ -532,9 +855,15 @@ class TabPoolManager:
                             logger.warning(f"[{session.id}] 标签页不健康，跳过")
                             continue
                         
+                        if self._should_defer_to_command(session, task_id):
+                            logger.debug(f"[{session.id}] defer acquire to high-priority command")
+                            continue
+
                         if session.acquire(task_id):
-                            # 🆕 仅当不是当前活动标签页时才激活
-                            if session.id != self._active_session_id:
+                            # 忙碌前先暂停该标签页全局监听，避免和工作流监听冲突
+                            self._stop_global_monitor_for_session(session.id, reason="acquire")
+                            # 可选：自动激活标签页（默认关闭，避免抢占用户焦点）
+                            if self._auto_activate_on_acquire and session.id != self._active_session_id:
                                 session.activate()
                                 self._active_session_id = session.id
                             
@@ -575,12 +904,23 @@ class TabPoolManager:
     async def acquire_async(self, task_id: str, timeout: float = None) -> Optional[TabSession]:
         return await asyncio.to_thread(self.acquire, task_id, timeout)
     
-    def release(self, tab_id: str, clear_page: bool = False):
+    def release(
+        self,
+        tab_id: str,
+        clear_page: bool = False,
+        check_triggers: bool = True,
+        rollback_request_count: bool = False
+    ):
         """释放标签页"""
         with self._condition:
             session = self._tabs.get(tab_id)
             if session:
-                session.release(clear_page=clear_page)
+                session.release(
+                    clear_page=clear_page,
+                    check_triggers=check_triggers,
+                    rollback_request_count=rollback_request_count
+                )
+                self._start_global_monitor_for_session(session)
                 self._condition.notify_all()
                 logger.debug(f"[{tab_id}] 已释放")
     
@@ -590,7 +930,9 @@ class TabPoolManager:
             count = 0
             for session in self._tabs.values():
                 if session.status == TabStatus.BUSY:
-                    session.force_release()
+                    session.force_release(clear_page=False, check_triggers=False)
+                    if session.status == TabStatus.IDLE:
+                        self._start_global_monitor_for_session(session)
                     count += 1
             self._condition.notify_all()
             logger.info(f"强制释放 {count} 个标签页")
@@ -676,10 +1018,20 @@ class TabPoolManager:
                     return None
                 
                 # 尝试获取
+                if self._should_defer_to_command(session, task_id):
+                    logger.debug(f"[{session.id}] defer by index acquire to high-priority command")
+                    remaining = deadline - time.time()
+                    if remaining <= 0:
+                        return None
+                    self._condition.wait(timeout=min(remaining, 0.5))
+                    continue
+
                 if session.status == TabStatus.IDLE:
                     if session.acquire(task_id):
-                        # 🆕 仅当不是当前活动标签页时才激活
-                        if session.id != self._active_session_id:
+                        # 忙碌前先暂停该标签页全局监听，避免和工作流监听冲突
+                        self._stop_global_monitor_for_session(session.id, reason="acquire_by_index")
+                        # 可选：自动激活标签页（默认关闭，避免抢占用户焦点）
+                        if self._auto_activate_on_acquire and session.id != self._active_session_id:
                             session.activate()
                             self._active_session_id = session.id
                         logger.info(f"TabPool → {session.id} (#{persistent_index})")
@@ -697,6 +1049,78 @@ class TabPoolManager:
     async def acquire_by_index_async(self, persistent_index: int, task_id: str, timeout: float = None) -> Optional[TabSession]:
         """异步版本的按编号获取"""
         return await asyncio.to_thread(self.acquire_by_index, persistent_index, task_id, timeout)
+
+    def terminate_by_index(
+        self,
+        persistent_index: int,
+        reason: str = "manual_terminate",
+        clear_page: bool = True,
+    ) -> Dict[str, Any]:
+        """
+        按标签页编号终止当前任务并释放占用。
+
+        行为：
+        1) 尝试取消该标签页 current_task 对应的请求；
+        2) 若标签页忙碌，执行 force_release()；
+        3) 若标签页空闲且 clear_page=True，重置到 about:blank；
+        4) 成功空闲后恢复全局网络监听。
+        """
+        with self._condition:
+            session_id = self._persistent_to_session_id.get(persistent_index)
+            if not session_id:
+                return {"ok": False, "error": "tab_not_found", "tab_index": persistent_index}
+
+            session = self._tabs.get(session_id)
+            if not session:
+                return {"ok": False, "error": "tab_not_found", "tab_index": persistent_index}
+
+            task_id = session.current_task_id or ""
+            cancelled = False
+            cancel_error = ""
+
+            if task_id:
+                try:
+                    from app.services.request_manager import request_manager
+                    cancelled = bool(request_manager.cancel_request(task_id, reason))
+                except Exception as e:
+                    cancel_error = str(e)
+                    logger.debug(f"[{session.id}] 取消任务失败（忽略）: {e}")
+
+            self._stop_global_monitor_for_session(session.id, reason=f"terminate:{reason}")
+
+            was_busy = session.status == TabStatus.BUSY
+            if was_busy:
+                session.force_release(clear_page=clear_page, check_triggers=False)
+            elif clear_page:
+                session.force_release(clear_page=True, check_triggers=False)
+            else:
+                session.release(clear_page=False, check_triggers=False)
+
+            # 尽量恢复可用状态的全局监听
+            if session.status == TabStatus.IDLE:
+                self._start_global_monitor_for_session(session)
+
+            self._condition.notify_all()
+
+            logger.warning(
+                f"[{session.id}] 手动终止: idx=#{persistent_index}, "
+                f"task={task_id or '-'}, cancelled={cancelled}, "
+                f"status={session.status.value}, reason={reason}"
+            )
+
+            result = {
+                "ok": True,
+                "tab_index": persistent_index,
+                "tab_id": session.id,
+                "was_busy": was_busy,
+                "task_id": task_id,
+                "cancelled": cancelled,
+                "status": session.status.value,
+                "reason": reason,
+            }
+            if cancel_error:
+                result["cancel_error"] = cancel_error
+            return result
     
     def get_tabs_with_index(self) -> List[Dict]:
         """获取所有标签页及其持久编号（供 API 调用）"""
@@ -743,7 +1167,7 @@ class TabPoolManager:
             old_preset = session.preset_name
             session.preset_name = preset_name if preset_name else None
             
-            logger.info(
+            logger.debug(
                 f"[{session.id}] 预设切换: "
                 f"'{old_preset or '主预设'}' → '{preset_name or '主预设'}'"
             )
@@ -773,14 +1197,22 @@ class TabPoolManager:
                 "idle": sum(1 for s in self._tabs.values() if s.status == TabStatus.IDLE),
                 "busy": sum(1 for s in self._tabs.values() if s.status == TabStatus.BUSY),
                 "max_tabs": self.max_tabs,
+                "global_network_enabled": self._global_network_enabled,
                 "known_raw_tabs": len(self._known_tab_ids),
                 "last_scan": round(time.time() - self._last_scan_time, 1),
                 "tabs": tabs_info
             }
+
+    def get_idle_sessions_snapshot(self) -> List[TabSession]:
+        """Return a shallow snapshot of currently idle tab sessions."""
+        with self._lock:
+            return [s for s in self._tabs.values() if s.status == TabStatus.IDLE]
     
     def shutdown(self):
         with self._lock:
             self._shutdown = True
+            if self._global_network_monitor:
+                self._global_network_monitor.shutdown()
             self._tabs.clear()
             self._known_tab_ids.clear()
             self._active_session_id = None  # 🆕 重置活动标签页记录

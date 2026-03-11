@@ -6,6 +6,7 @@ app/core/workflow_editor.py - 可视化工作流编辑器注入管理
 - 向目标页面注入编辑器
 """
 
+import json
 import os
 from pathlib import Path
 from typing import Optional
@@ -18,6 +19,11 @@ class WorkflowEditorInjector:
     
     _script_cache: Optional[str] = None
     _script_mtime: float = 0
+
+    @staticmethod
+    def _build_js_assignment(var_name: str, value) -> str:
+        """生成安全的 JS 变量赋值语句。"""
+        return f"window.{var_name} = {json.dumps(value, ensure_ascii=False)};"
     
     @classmethod
     def _load_script(cls) -> str:
@@ -39,7 +45,13 @@ class WorkflowEditorInjector:
         return cls._script_cache
     
     @classmethod
-    def inject(cls, tab, site_config: dict = None, target_domain: str = None) -> dict:
+    def inject(
+        cls,
+        tab,
+        site_config: dict = None,
+        target_domain: str = None,
+        preset_name: str = None
+    ) -> dict:
         """
         向标签页注入编辑器
         
@@ -77,15 +89,24 @@ class WorkflowEditorInjector:
                 api_port = os.getenv("PORT", "9099")
                 api_base = f"http://127.0.0.1:{api_port}"
                 
-                update_parts = [f"window.__WORKFLOW_EDITOR_API_BASE__ = '{api_base}';"]
+                update_parts = [
+                    cls._build_js_assignment("__WORKFLOW_EDITOR_API_BASE__", api_base)
+                ]
                 
                 if target_domain:
-                    update_parts.append(f"window.__WORKFLOW_EDITOR_TARGET_DOMAIN__ = '{target_domain}';")
+                    update_parts.append(
+                        cls._build_js_assignment("__WORKFLOW_EDITOR_TARGET_DOMAIN__", target_domain)
+                    )
+
+                if preset_name:
+                    update_parts.append(
+                        cls._build_js_assignment("__WORKFLOW_EDITOR_PRESET_NAME__", preset_name)
+                    )
                 
                 if site_config:
-                    import json
-                    config_json = json.dumps(site_config, ensure_ascii=False)
-                    update_parts.append(f"window.__WORKFLOW_EDITOR_CONFIG__ = {config_json};")
+                    update_parts.append(
+                        cls._build_js_assignment("__WORKFLOW_EDITOR_CONFIG__", site_config)
+                    )
                 
                 # 更新配置变量
                 tab.run_js("\n".join(update_parts))
@@ -107,17 +128,26 @@ class WorkflowEditorInjector:
             injection_parts = []
             
             # 1. 注入 API 地址
-            injection_parts.append(f"window.__WORKFLOW_EDITOR_API_BASE__ = '{api_base}';")
+            injection_parts.append(
+                cls._build_js_assignment("__WORKFLOW_EDITOR_API_BASE__", api_base)
+            )
             
             # 2. 注入目标域名
             if target_domain:
-                injection_parts.append(f"window.__WORKFLOW_EDITOR_TARGET_DOMAIN__ = '{target_domain}';")
+                injection_parts.append(
+                    cls._build_js_assignment("__WORKFLOW_EDITOR_TARGET_DOMAIN__", target_domain)
+                )
+
+            if preset_name:
+                injection_parts.append(
+                    cls._build_js_assignment("__WORKFLOW_EDITOR_PRESET_NAME__", preset_name)
+                )
             
             # 3. 注入站点配置
             if site_config:
-                import json
-                config_json = json.dumps(site_config, ensure_ascii=False)
-                injection_parts.append(f"window.__WORKFLOW_EDITOR_CONFIG__ = {config_json};")
+                injection_parts.append(
+                    cls._build_js_assignment("__WORKFLOW_EDITOR_CONFIG__", site_config)
+                )
             
             # 4. 拼接完整脚本（变量声明 + 编辑器代码）
             full_script = "\n".join(injection_parts) + "\n\n" + script

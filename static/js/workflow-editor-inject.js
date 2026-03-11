@@ -14,17 +14,21 @@
   
     // ========== 配置 ==========
     const TYPES = {
+        COORD_CLICK: { color: 'rgba(249, 115, 22, 0.18)', border: '#F97316', name: 'Coord Click' },
         CLICK: { color: 'rgba(59, 130, 246, 0.15)', border: '#3B82F6', name: '点击' },
         INPUT: { color: 'rgba(16, 185, 129, 0.15)', border: '#10B981', name: '输入' },
         READ: { color: 'rgba(139, 92, 246, 0.15)', border: '#8B5CF6', name: '读取' }
     };
 
     // 🔧 后端 API 地址（从注入时传入，或使用默认值）
+    const BALL_SIZE = 32;
+    const BALL_RADIUS = BALL_SIZE / 2;
     const API_BASE = window.__WORKFLOW_EDITOR_API_BASE__ || 'http://127.0.0.1:9099';
 
     const state = {
         steps: [],
         siteConfig: null,
+        presetName: null,
         isPickingElement: false,
         pickingCallback: null,
         isVisible: true
@@ -253,6 +257,61 @@
     
     return element.tagName.toLowerCase();
   }
+
+  function normalizeKey(value) {
+    return String(value || '')
+      .trim()
+      .replace(/[^\w\u4e00-\u9fa5-]+/g, '_')
+      .replace(/^_+|_+$/g, '');
+  }
+
+  function findSelectorKeyByValue(selectors, selector) {
+    if (!selector) return '';
+    for (const [key, value] of Object.entries(selectors || {})) {
+      if (value === selector) return key;
+    }
+    return '';
+  }
+
+  function generateTargetKey(type, selectors, preferred) {
+    const used = selectors || {};
+    const normalizedPreferred = normalizeKey(preferred);
+    if (normalizedPreferred) {
+      return normalizedPreferred;
+    }
+
+    const base =
+      type === 'INPUT' ? 'input_box' :
+      type === 'READ' ? 'result_container' :
+      'click_target';
+
+    if (!used[base]) {
+      return base;
+    }
+
+    let index = 1;
+    while (used[`${base}_${index}`]) {
+      index += 1;
+    }
+    return `${base}_${index}`;
+  }
+
+  function ensureBallTargetKey(ball, selectors) {
+    if (!ball.config.selector) {
+      return ball.config.targetKey || '';
+    }
+
+    const existingKey = findSelectorKeyByValue(selectors, ball.config.selector);
+    if (existingKey) {
+      ball.config.targetKey = existingKey;
+      return existingKey;
+    }
+
+    const resolvedKey = generateTargetKey(ball.type, selectors, ball.config.targetKey);
+    ball.config.targetKey = resolvedKey;
+    selectors[resolvedKey] = ball.config.selector;
+    return resolvedKey;
+  }
   
   // ========== 小球类 ==========
     class Ball {
@@ -267,6 +326,8 @@
                 random_radius: 10,
                 text: '',
                 selector: '',
+                targetKey: '',
+                optional: false,
                 ...opts.config
             };
 
@@ -325,8 +386,8 @@
     }
     
     move(x, y) {
-      this.x = Math.max(0, Math.min(window.innerWidth - 28, x));
-      this.y = Math.max(0, Math.min(window.innerHeight - 28, y));
+      this.x = Math.max(0, Math.min(window.innerWidth - BALL_SIZE, x));
+      this.y = Math.max(0, Math.min(window.innerHeight - BALL_SIZE, y));
       this.element.style.left = this.x + 'px';
       this.element.style.top = this.y + 'px';
     }
@@ -343,7 +404,7 @@
       const target = findElement(this.config.selector);
       if (target) {
         const pos = getElementCenter(target);
-        this.move(pos.x - 14, pos.y - 14);
+        this.move(pos.x - BALL_RADIUS, pos.y - BALL_RADIUS);
       }
     }
 
@@ -374,13 +435,13 @@
         delay_ms: this.config.delay_ms
       };
       
-      if (this.type === 'CLICK') {
-        data.x = Math.round(this.x + 14);
-        data.y = Math.round(this.y + 14);
+      if (this.type === 'CLICK' || this.type === 'COORD_CLICK') {
+        data.x = Math.round(this.x + BALL_RADIUS);
+        data.y = Math.round(this.y + BALL_RADIUS);
         data.random_radius = this.config.random_radius;
       } else if (this.type === 'INPUT') {
-        data.x = Math.round(this.x + 14);
-        data.y = Math.round(this.y + 14);
+        data.x = Math.round(this.x + BALL_RADIUS);
+        data.y = Math.round(this.y + BALL_RADIUS);
         data.text = this.config.text;
       } else if (this.type === 'READ') {
         data.selector = this.config.selector;
@@ -450,7 +511,39 @@
     body.appendChild(el('div', { className: 'wfe-divider' }));
     
     // 类型特定
-    if (ball.type === 'CLICK') {
+    if (ball.type !== 'COORD_CLICK') {
+      const keyInput = el('input', {
+        type: 'text',
+        className: 'wfe-menu-input wide',
+        value: ball.config.targetKey || '',
+        placeholder: 'selector_key'
+      });
+      keyInput.addEventListener('input', () => {
+        const normalized = normalizeKey(keyInput.value);
+        ball.config.targetKey = normalized;
+        keyInput.value = normalized;
+      });
+      keyInput.addEventListener('click', e => e.stopPropagation());
+      body.appendChild(el('div', { className: 'wfe-menu-item' }, [
+        el('span', { className: 'wfe-menu-label' }, ['Key']),
+        keyInput
+      ]));
+    }
+
+    const optionalInput = el('input', {
+      type: 'checkbox',
+      checked: !!ball.config.optional
+    });
+    optionalInput.addEventListener('change', () => ball.config.optional = optionalInput.checked);
+    optionalInput.addEventListener('click', e => e.stopPropagation());
+    body.appendChild(el('div', { className: 'wfe-menu-item' }, [
+      el('span', { className: 'wfe-menu-label' }, ['是否必要']),
+      optionalInput
+    ]));
+
+    body.appendChild(el('div', { className: 'wfe-divider' }));
+
+    if (ball.type === 'CLICK' || ball.type === 'COORD_CLICK') {
       const radiusInput = el('input', {
         type: 'number',
         className: 'wfe-menu-input',
@@ -466,8 +559,21 @@
         radiusInput
       ]));
       body.appendChild(el('div', { className: 'wfe-menu-item disabled' }, [
-        el('span', { className: 'wfe-menu-label' }, [`📍 坐标: (${Math.round(ball.x+14)}, ${Math.round(ball.y+14)})`])
+        el('span', { className: 'wfe-menu-label' }, [`📍 坐标: (${Math.round(ball.x + BALL_RADIUS)}, ${Math.round(ball.y + BALL_RADIUS)})`])
       ]));
+      if (ball.type === 'CLICK') {
+        body.appendChild(el('div', { className: 'wfe-menu-item disabled' }, [
+          el('span', { className: 'wfe-menu-label' }, [`Selector: ${ball.config.selector || '(unset)'}`])
+        ]));
+        const clickPickBtn = el('div', { className: 'wfe-menu-item clickable' }, [
+          el('span', { className: 'wfe-menu-label', style: { color: '#8b5cf6' } }, ['Pick element'])
+        ]);
+        clickPickBtn.addEventListener('click', () => {
+          hideMenu();
+          startPicker(ball);
+        });
+        body.appendChild(clickPickBtn);
+      }
     } else if (ball.type === 'INPUT') {
       const textInput = el('input', {
         type: 'text',
@@ -483,8 +589,19 @@
         textInput
       ]));
       body.appendChild(el('div', { className: 'wfe-menu-item disabled' }, [
-        el('span', { className: 'wfe-menu-label' }, [`📍 坐标: (${Math.round(ball.x+14)}, ${Math.round(ball.y+14)})`])
+        el('span', { className: 'wfe-menu-label' }, [`📍 坐标: (${Math.round(ball.x + BALL_RADIUS)}, ${Math.round(ball.y + BALL_RADIUS)})`])
       ]));
+      body.appendChild(el('div', { className: 'wfe-menu-item disabled' }, [
+        el('span', { className: 'wfe-menu-label' }, [`Selector: ${ball.config.selector || '(unset)'}`])
+      ]));
+      const inputPickBtn = el('div', { className: 'wfe-menu-item clickable' }, [
+        el('span', { className: 'wfe-menu-label', style: { color: '#8b5cf6' } }, ['Pick element'])
+      ]);
+      inputPickBtn.addEventListener('click', () => {
+        hideMenu();
+        startPicker(ball);
+      });
+      body.appendChild(inputPickBtn);
     } else if (ball.type === 'READ') {
       body.appendChild(el('div', { className: 'wfe-menu-item disabled' }, [
         el('span', { className: 'wfe-menu-label' }, [`🔍 ${ball.config.selector || '(未设置)'}`])
@@ -539,6 +656,11 @@
     state.isPickingElement = true;
     state.pickingCallback = (selector) => {
       ball.config.selector = selector;
+      ball.clearWarning();
+      const selectors = state.siteConfig?.selectors || {};
+      if (!ball.config.targetKey) {
+        ball.config.targetKey = findSelectorKeyByValue(selectors, selector) || generateTargetKey(ball.type, selectors);
+      }
       ball.locateToElement();
     };
     
@@ -595,8 +717,8 @@
         const seq = state.steps.length + 1;
 
         // 默认位置：错开排列
-        let x = 100 + (seq - 1) * 40;
-        let y = window.innerHeight / 2;
+        let x = Number.isFinite(config.x) ? config.x - BALL_RADIUS : 100 + (seq - 1) * 40;
+        let y = Number.isFinite(config.y) ? config.y - BALL_RADIUS : window.innerHeight / 2;
         let elementNotFound = false;
 
         if (config.selector) {
@@ -604,8 +726,8 @@
             if (target) {
                 const pos = getElementCenter(target);
                 if (pos) {
-                    x = pos.x - 14;
-                    y = pos.y - 14;
+                    x = pos.x - BALL_RADIUS;
+                    y = pos.y - BALL_RADIUS;
                 }
             } else {
                 // 元素未找到，标记警告状态
@@ -629,8 +751,8 @@
             ball.setWarning(`元素不存在: ${config.selector}`);
         }
 
-        // 仅在没有选择器的 READ 类型时才自动拾取
-        if (type === 'READ' && !config.selector) {
+        // 仅在新建步骤时自动拾取；坐标点击直接使用保存的坐标
+        if (!config.selector && !Number.isFinite(config.x) && ['CLICK', 'INPUT', 'READ'].includes(type)) {
             setTimeout(() => startPicker(ball), 100);
         }
 
@@ -656,15 +778,14 @@
   
     // ========== 🔧 加载现有配置（读取实际延迟）==========
     function loadFromConfig(config) {
-        if (!config || !config.workflow || !config.selectors) {
-            console.log('[WorkflowEditor] 无配置数据可加载');
-            return;
-        }
-
         clearAll();
-        state.siteConfig = config;
+        state.siteConfig = {
+            ...(config || {}),
+            selectors: { ...((config && config.selectors) || {}) },
+            workflow: Array.isArray(config?.workflow) ? config.workflow : []
+        };
 
-        const workflow = config.workflow;
+        const workflow = state.siteConfig.workflow;
         let pendingDelay = 0; // 累积前面 WAIT 步骤的延迟
 
         workflow.forEach((step, idx) => {
@@ -678,13 +799,13 @@
             }
 
             // 跳过 KEY_PRESS 等其他步骤
-            if (!['CLICK', 'FILL_INPUT', 'STREAM_WAIT'].includes(action)) {
+            if (!['CLICK', 'COORD_CLICK', 'FILL_INPUT', 'STREAM_WAIT'].includes(action)) {
                 console.log(`[WorkflowEditor] 跳过步骤类型: ${action}`);
                 return;
             }
 
             const targetKey = step.target;
-            const selector = config.selectors[targetKey];
+            const selector = state.siteConfig.selectors[targetKey];
 
             let type, stepConfig = {};
 
@@ -694,22 +815,35 @@
                     delay_ms: pendingDelay,
                     random_radius: 10,
                     selector: selector,
-                    targetKey: targetKey
+                    targetKey: targetKey,
+                    optional: !!step.optional
+                };
+            } else if (action === 'COORD_CLICK') {
+                type = 'COORD_CLICK';
+                stepConfig = {
+                    delay_ms: pendingDelay,
+                    x: Number(step.value?.x ?? 100),
+                    y: Number(step.value?.y ?? (window.innerHeight / 2)),
+                    random_radius: Number(step.value?.random_radius ?? 10),
+                    targetKey: targetKey || '',
+                    optional: !!step.optional
                 };
             } else if (action === 'FILL_INPUT') {
                 type = 'INPUT';
                 stepConfig = {
                     delay_ms: pendingDelay,
-                    text: '',
+                    text: step.value || '',
                     selector: selector,
-                    targetKey: targetKey
+                    targetKey: targetKey,
+                    optional: !!step.optional
                 };
             } else if (action === 'STREAM_WAIT') {
                 type = 'READ';
                 stepConfig = {
                     delay_ms: pendingDelay,
                     selector: selector || '',
-                    targetKey: targetKey
+                    targetKey: targetKey,
+                    optional: !!step.optional
                 };
             }
 
@@ -747,6 +881,7 @@
     if (toolbar) return;
     
       toolbar = el('div', { className: 'wfe-toolbar', id: 'wfe-toolbar' }, [
+          el('button', { className: 'wfe-btn', 'data-action': 'add-coord-click' }, ['+ Coord']),
           el('button', { className: 'wfe-btn', 'data-action': 'add-click' }, ['+ 点击']),
           el('button', { className: 'wfe-btn', 'data-action': 'add-input' }, ['+ 输入']),
           el('button', { className: 'wfe-btn', 'data-action': 'add-read' }, ['+ 读取']),
@@ -762,6 +897,7 @@
       if (!btn) return;
       
         switch (btn.dataset.action) {
+            case 'add-coord-click': addBall('COORD_CLICK'); break;
             case 'add-click': addBall('CLICK'); break;
             case 'add-input': addBall('INPUT'); break;
             case 'add-read': addBall('READ'); break;
@@ -774,21 +910,22 @@
   
     async function doSave() {
         if (!state.siteConfig) {
-            alert('❌ 未加载站点配置，无法保存');
-            return;
+            state.siteConfig = { selectors: {}, workflow: [] };
         }
 
         const steps = state.steps;
-        if (steps.length === 0) {
-            alert('❌ 没有可保存的步骤');
-            return;
-        }
+        const selectors = { ...(state.siteConfig.selectors || {}) };
 
         // 构建新的 workflow 数组
         const newWorkflow = [];
 
         steps.forEach((ball, idx) => {
             const delayMs = ball.config.delay_ms || 0;
+            const targetKey = ball.type === 'CLICK'
+                ? normalizeKey(ball.config.targetKey || '')
+                : ['INPUT', 'READ'].includes(ball.type)
+                    ? ensureBallTargetKey(ball, selectors)
+                    : '';
 
             // 如果有延迟，插入 WAIT 步骤
             if (delayMs > 0) {
@@ -802,24 +939,38 @@
 
             // 插入实际动作步骤
             if (ball.type === 'CLICK') {
+                if (ball.config.selector && targetKey) {
+                    selectors[targetKey] = ball.config.selector;
+                }
                 newWorkflow.push({
                     action: 'CLICK',
-                    target: ball.config.targetKey || 'custom_click_' + idx,
-                    optional: false,
+                    target: targetKey || '',
+                    optional: !!ball.config.optional,
                     value: null
+                });
+            } else if (ball.type === 'COORD_CLICK') {
+                newWorkflow.push({
+                    action: 'COORD_CLICK',
+                    target: '',
+                    optional: !!ball.config.optional,
+                    value: {
+                        x: Math.round(ball.x + BALL_RADIUS),
+                        y: Math.round(ball.y + BALL_RADIUS),
+                        random_radius: Number(ball.config.random_radius || 0)
+                    }
                 });
             } else if (ball.type === 'INPUT') {
                 newWorkflow.push({
                     action: 'FILL_INPUT',
-                    target: ball.config.targetKey || 'input_box',
-                    optional: false,
+                    target: targetKey || 'input_box',
+                    optional: !!ball.config.optional,
                     value: ball.config.text || null
                 });
             } else if (ball.type === 'READ') {
                 newWorkflow.push({
                     action: 'STREAM_WAIT',
-                    target: ball.config.targetKey || 'result_container',
-                    optional: false,
+                    target: targetKey || 'result_container',
+                    optional: !!ball.config.optional,
                     value: null
                 });
             }
@@ -827,19 +978,29 @@
 
         // 获取当前域名
         const domain = window.location.hostname;
+        const presetName = window.__WORKFLOW_EDITOR_PRESET_NAME__ || state.presetName || '主预设';
 
-        console.log('[WorkflowEditor] 保存配置:', { domain, workflow: newWorkflow });
+        console.log('[WorkflowEditor] 保存配置:', { domain, presetName, workflow: newWorkflow, selectors });
 
         try {
             const response = await fetch(`${API_BASE}/api/sites/${domain}/workflow`, {
                 method: 'PUT',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ workflow: newWorkflow })
+                body: JSON.stringify({
+                    workflow: newWorkflow,
+                    selectors,
+                    preset_name: presetName
+                })
             });
 
             if (response.ok) {
                 const result = await response.json();
-                alert(`✅ 保存成功！\n\n已更新 ${steps.length} 个步骤到 ${domain}`);
+                state.siteConfig = {
+                    ...state.siteConfig,
+                    selectors,
+                    workflow: newWorkflow
+                };
+                alert(`✅ 保存成功！\n\n已更新 ${steps.length} 个步骤到 ${domain} / ${presetName}`);
                 console.log('[WorkflowEditor] 保存结果:', result);
             } else {
                 const error = await response.json();
@@ -851,9 +1012,9 @@
             // 检测 CSP 或网络错误，提供降级方案
             if (e.message?.includes('Failed to fetch') || e.message?.includes('Content Security Policy')) {
                 const exportData = {
-                    domain: domain,
-                    workflow: newWorkflow,
-                    timestamp: new Date().toISOString()
+                    ...(state.siteConfig || {}),
+                    selectors,
+                    workflow: newWorkflow
                 };
                 const jsonStr = JSON.stringify(exportData, null, 2);
 
@@ -862,8 +1023,8 @@
                     await navigator.clipboard.writeText(jsonStr);
                     alert(
                         `⚠️ 由于该网站安全策略限制，无法直接保存。\n\n` +
-                        `配置已复制到剪贴板！\n\n` +
-                        `您可返回控制面板，在「工作流」区域手动更新配置。`
+                        `当前预设配置已复制到剪贴板。\n\n` +
+                        `请返回控制面板的「查看 JSON」，直接粘贴并保存当前预设。`
                     );
                     console.log('[WorkflowEditor] 配置已复制到剪贴板:', exportData);
                 } catch (clipboardError) {
@@ -902,6 +1063,7 @@
 
         const config = window.__WORKFLOW_EDITOR_CONFIG__;
         const targetDomain = window.__WORKFLOW_EDITOR_TARGET_DOMAIN__;
+        state.presetName = window.__WORKFLOW_EDITOR_PRESET_NAME__ || null;
         const currentDomain = window.location.hostname;
 
         // 域名校验
@@ -936,6 +1098,7 @@
   
   window.WorkflowEditor = {
     addClick: () => addBall('CLICK'),
+    addCoordClick: () => addBall('COORD_CLICK'),
     addInput: () => addBall('INPUT'),
     addRead: () => addBall('READ'),
     clear: clearAll,
@@ -943,7 +1106,10 @@
     show: showEditor,
     hide: hideEditor,
     getSteps: () => state.steps.map(b => b.toJSON()),
-    reload: () => loadFromConfig(state.siteConfig)
+    reload: () => {
+      state.presetName = window.__WORKFLOW_EDITOR_PRESET_NAME__ || state.presetName || null;
+      loadFromConfig(window.__WORKFLOW_EDITOR_CONFIG__ || state.siteConfig);
+    }
   };
   
 })();

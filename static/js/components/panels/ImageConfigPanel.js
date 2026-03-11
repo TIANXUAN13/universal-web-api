@@ -5,7 +5,7 @@ window.ImageConfigPanel = {
     props: {
         imageConfig: { type: Object, required: true },
         currentDomain: { type: String, default: null },
-        collapsed: { type: Boolean, default: false }
+        collapsed: { type: Boolean, default: true }
     },
     emits: ['update:collapsed', 'update-image-config', 'test-image-extraction', 'reload-config'],
     data() {
@@ -109,7 +109,7 @@ window.ImageConfigPanel = {
             <div class="px-4 py-3 border-b dark:border-gray-700 flex justify-between items-center cursor-pointer hover:bg-gray-50 dark:hover:bg-gray-700/50 transition-colors"
                  @click="toggle">
                 <div class="flex items-center gap-2">
-                    <span class="text-gray-500 dark:text-gray-400" v-html="collapsed ? $icons.chevronDown : $icons.chevronUp"></span>
+                    <span class="w-4 inline-flex justify-center text-gray-500 dark:text-gray-400" v-html="collapsed ? $icons.chevronDown : $icons.chevronUp"></span>
                     <h3 class="font-semibold text-gray-900 dark:text-white">🖼️ 图片提取</h3>
                     <span v-if="isEnabled" class="px-2 py-0.5 text-xs bg-green-100 dark:bg-green-900/50 text-green-700 dark:text-green-300 rounded font-medium">已启用</span>
                     <span v-else class="px-2 py-0.5 text-xs bg-gray-100 dark:bg-gray-700 text-gray-500 dark:text-gray-400 rounded">未启用</span>
@@ -278,3 +278,4 @@ window.ImageConfigPanel = {
         </div>
     `
 };
+

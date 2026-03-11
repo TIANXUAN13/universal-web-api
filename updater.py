@@ -45,6 +45,9 @@ DEFAULT_PRESERVE = [
     "updater.py"
 ]
 
+COMMANDS_CONFIG_PATH = Path("config") / "commands.json"
+COMMAND_RUNTIME_FIELDS = ("last_triggered", "trigger_count")
+
 class Colors:
     CYAN = '\033[96m'
     GREEN = '\033[92m'
@@ -504,6 +507,113 @@ def should_preserve(path: Path, preserve_patterns: list) -> bool:
     
     return False
 
+def load_commands_config(path: Path) -> list:
+    """加载命令配置，兼容 list 和 {commands: [...]} 两种格式"""
+    if not path.exists():
+        return []
+
+    try:
+        with open(path, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+
+        if isinstance(data, dict):
+            data = data.get("commands", [])
+
+        if isinstance(data, list):
+            return [cmd for cmd in data if isinstance(cmd, dict)]
+
+        log_warning(f"命令配置格式无效，按空列表处理: {path}")
+        return []
+    except Exception as e:
+        log_warning(f"加载命令配置失败，按空列表处理: {path} ({e})")
+        return []
+
+def _same_command(left: dict, right: dict) -> bool:
+    """判断两条命令是否代表同一个内置命令。"""
+    left_id = str(left.get("id", "")).strip()
+    right_id = str(right.get("id", "")).strip()
+    if left_id and right_id:
+        return left_id == right_id
+
+    left_name = str(left.get("name", "")).strip()
+    right_name = str(right.get("name", "")).strip()
+    return bool(left_name and right_name and left_name == right_name)
+
+def _merge_command_record(existing: dict, incoming: dict) -> dict:
+    """以发布版命令为准，保留本地运行时统计字段。"""
+    merged = dict(incoming)
+    for field in COMMAND_RUNTIME_FIELDS:
+        if field in existing:
+            merged[field] = existing[field]
+    return merged
+
+def merge_commands(existing: list, incoming: list) -> tuple[list, dict]:
+    """
+    合并命令配置。
+
+    - 发布版内置命令：用新版本覆盖旧版本
+    - 本地自定义命令：若发布版中不存在，则保留
+    """
+    existing_commands = [cmd for cmd in (existing or []) if isinstance(cmd, dict)]
+    incoming_commands = [cmd for cmd in (incoming or []) if isinstance(cmd, dict)]
+
+    merged = []
+    matched_existing = set()
+    updated = 0
+    added = 0
+    preserved = 0
+
+    for incoming_cmd in incoming_commands:
+        match_index = None
+        for index, existing_cmd in enumerate(existing_commands):
+            if index in matched_existing:
+                continue
+            if _same_command(existing_cmd, incoming_cmd):
+                match_index = index
+                break
+
+        if match_index is None:
+            merged.append(dict(incoming_cmd))
+            added += 1
+            continue
+
+        merged.append(_merge_command_record(existing_commands[match_index], incoming_cmd))
+        matched_existing.add(match_index)
+        updated += 1
+
+    for index, existing_cmd in enumerate(existing_commands):
+        if index in matched_existing:
+            continue
+        merged.append(dict(existing_cmd))
+        preserved += 1
+
+    return merged, {
+        "updated": updated,
+        "added": added,
+        "preserved": preserved,
+    }
+
+def merge_command_file(src_path: Path, dst_path: Path):
+    """合并命令配置文件，更新内置命令并保留用户自定义命令"""
+    incoming = load_commands_config(src_path)
+    existing = load_commands_config(dst_path)
+    merged, stats = merge_commands(existing, incoming)
+    had_existing = dst_path.exists()
+
+    dst_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(dst_path, 'w', encoding='utf-8') as f:
+        json.dump({"commands": merged}, f, indent=2, ensure_ascii=False)
+
+    if had_existing:
+        log_info(
+            "命令配置已合并: "
+            f"更新 {stats['updated']} 条内置命令，"
+            f"新增 {stats['added']} 条发布命令，"
+            f"保留 {stats['preserved']} 条本地命令"
+        )
+    else:
+        log_info(f"命令配置已写入: {len(merged)} 条")
+
 def extract_and_update(zip_path: Path, project_dir: Path, preserve: list) -> bool:
     """解压并更新"""
     try:
@@ -534,6 +644,11 @@ def extract_and_update(zip_path: Path, project_dir: Path, preserve: list) -> boo
                 
                 rel_path = src_item.relative_to(source_dir)
                 dst_item = project_dir / rel_path
+
+                if rel_path == COMMANDS_CONFIG_PATH:
+                    merge_command_file(src_item, dst_item)
+                    updated += 1
+                    continue
                 
                 if should_preserve(rel_path, preserve):
                     skipped += 1

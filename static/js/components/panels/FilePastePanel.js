@@ -5,7 +5,7 @@ window.FilePastePanel = {
     props: {
         sites: { type: Object, required: true },
         currentDomain: { type: String, default: null },
-        collapsed: { type: Boolean, default: false }
+        collapsed: { type: Boolean, default: true }
     },
     emits: ['update:collapsed'],
     data() {
@@ -37,7 +37,7 @@ window.FilePastePanel = {
 
         /**
          * 获取指定站点的活跃预设配置（可变引用）
-         * 查找顺序：ConfigTab 选中的预设 → 主预设 → 第一个预设
+         * 查找顺序：ConfigTab 选中的预设 → 站点默认预设 → 主预设 → 第一个预设
          */
         _getActivePresetData(domain) {
             const site = this.sites[domain];
@@ -56,7 +56,9 @@ window.FilePastePanel = {
                 } catch (e) { /* 忽略 */ }
             }
 
-            // 回退：主预设 → 第一个预设
+            // 回退：默认预设 → 主预设 → 第一个预设
+            const defaultPreset = typeof site.default_preset === 'string' ? site.default_preset : null;
+            if (defaultPreset && presets[defaultPreset]) return presets[defaultPreset];
             if (presets['主预设']) return presets['主预设'];
             const keys = Object.keys(presets);
             return keys.length > 0 ? presets[keys[0]] : null;
@@ -106,7 +108,7 @@ window.FilePastePanel = {
             <div class="px-4 py-3 border-b dark:border-gray-700 flex justify-between items-center cursor-pointer hover:bg-gray-50 dark:hover:bg-gray-700/50 transition-colors"
                  @click="toggle">
                 <div class="flex items-center gap-2">
-                    <span class="text-gray-500 dark:text-gray-400" v-html="collapsed ? ($root.$icons?.chevronDown || '▶') : ($root.$icons?.chevronUp || '▼')"></span>
+                    <span class="w-4 inline-flex justify-center" aria-hidden="true"></span>
                     <h3 class="font-semibold text-gray-900 dark:text-white">📄 文件粘贴</h3>
                     <span class="text-sm text-gray-500 dark:text-gray-400">({{ enabledCount }}/{{ domains.length }} 启用)</span>
                 </div>
@@ -197,3 +199,4 @@ window.FilePastePanel = {
         </div>
     `
 };
+

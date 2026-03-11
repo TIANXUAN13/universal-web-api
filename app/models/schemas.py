@@ -15,6 +15,7 @@ from pydantic import BaseModel
 ActionType = Literal[
     "FILL_INPUT",
     "CLICK",
+    "COORD_CLICK",
     "STREAM_WAIT",
     "STREAM_OUTPUT",
     "KEY_PRESS",
@@ -46,7 +47,7 @@ class WorkflowStep(TypedDict):
     action: ActionType
     target: str
     optional: bool
-    value: Optional[str]
+    value: Optional[Any]
 
 
 # ================= 元素定义 =================

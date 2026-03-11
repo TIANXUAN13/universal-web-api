@@ -5,7 +5,7 @@ window.StreamConfigPanel = {
     props: {
         streamConfig: { type: Object, required: true },
         currentDomain: { type: String, default: null },
-        collapsed: { type: Boolean, default: false }
+        collapsed: { type: Boolean, default: true }
     },
     emits: ['update:collapsed', 'save-stream-config'],
     data() {
@@ -83,7 +83,7 @@ window.StreamConfigPanel = {
             <div class="px-4 py-3 border-b dark:border-gray-700 flex justify-between items-center cursor-pointer hover:bg-gray-50 dark:hover:bg-gray-700/50 transition-colors"
                  @click="toggle">
                 <div class="flex items-center gap-2">
-                    <span class="text-gray-500 dark:text-gray-400" v-html="collapsed ? $icons.chevronDown : $icons.chevronUp"></span>
+                    <span class="w-4 inline-flex justify-center text-gray-500 dark:text-gray-400" v-html="collapsed ? $icons.chevronDown : $icons.chevronUp"></span>
                     <h3 class="font-semibold text-gray-900 dark:text-white">📡 非流式监听</h3>
                     <span :class="[
                         'px-2 py-0.5 text-xs rounded font-medium',
@@ -223,3 +223,4 @@ window.StreamConfigPanel = {
         </div>
     `
 };
+

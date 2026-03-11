@@ -10,6 +10,7 @@ app/core/workflow/executor.py - 工作流执行器
 
 import time
 import random
+import threading
 from typing import Generator, Dict, Any, Callable, Optional
 
 from app.core.config import (
@@ -25,7 +26,8 @@ from app.core.stream_monitor import StreamMonitor
 from app.core.network_monitor import (
     create_network_monitor,
     NetworkMonitorTimeout,
-    NetworkMonitorError
+    NetworkMonitorError,
+    NetworkInterceptionTriggered,
 )
 
 from .text_input import TextInputHandler
@@ -42,8 +44,10 @@ class WorkflowExecutor:
                  extractor = None,
                  image_config: Dict = None,
                  stream_config: Dict = None,
-                 file_paste_config: Dict = None):
+                 file_paste_config: Dict = None,
+                 session = None):
         self.tab = tab
+        self.session = session
         self.stealth_mode = stealth_mode
         self.finder = ElementFinder(tab)
         self.formatter = SSEFormatter()
@@ -58,18 +62,30 @@ class WorkflowExecutor:
         self._stream_monitor = None
         
         # 检查是否启用网络监听模式
-        stream_mode = stream_config.get("mode", "dom") if stream_config else "dom"
+        self._stream_mode = stream_config.get("mode", "dom") if stream_config else "dom"
         network_config = stream_config.get("network", {}) if stream_config else {}
-        
-        # 只有当 mode="network" 且配置了 parser 时才启用网络监听
-        if stream_mode == "network" and network_config and network_config.get("parser"):
-            # 创建网络监听器
+        self._intercept_only_mode = False
+
+        interception_enabled = False
+        interception_pattern = ""
+        if self.session is not None:
+            try:
+                from app.services.command_engine import command_engine
+                interception_enabled = command_engine.has_network_interception_for_session(self.session)
+                if interception_enabled:
+                    interception_pattern = command_engine.get_network_listen_pattern(self.session)
+            except Exception as e:
+                logger.debug(f"[Executor] 读取网络拦截命令失败（忽略）: {e}")
+
+        # 正常网络流式：使用 parser 解析增量
+        if self._stream_mode == "network" and network_config and network_config.get("parser"):
             try:
                 self._network_monitor = create_network_monitor(
                     tab=tab,
                     formatter=self.formatter,
                     stream_config=stream_config,
-                    stop_checker=should_stop_checker
+                    stop_checker=should_stop_checker,
+                    event_handler=self._handle_network_event
                 )
                 logger.debug(
                     f"[Executor] 网络监听器已启用 "
@@ -77,6 +93,32 @@ class WorkflowExecutor:
                 )
             except Exception as e:
                 logger.warning(f"[Executor] 网络监听器创建失败: {e}")
+
+        # DOM 流式 + 网络异常拦截：启用 event-only 网络监听（独立于 stream_mode）
+        elif interception_enabled:
+            try:
+                interception_cfg = dict(network_config or {})
+                if not interception_cfg.get("listen_pattern"):
+                    interception_cfg["listen_pattern"] = interception_pattern or "http"
+                interception_cfg["event_only"] = True
+                interception_cfg.setdefault("first_response_timeout", 8)
+                interception_cfg.setdefault("silence_threshold", 2)
+                interception_cfg.setdefault("response_interval", 0.3)
+
+                self._network_monitor = create_network_monitor(
+                    tab=tab,
+                    formatter=self.formatter,
+                    stream_config={"network": interception_cfg},
+                    stop_checker=should_stop_checker,
+                    event_handler=self._handle_network_event
+                )
+                self._intercept_only_mode = True
+                logger.debug(
+                    "[Executor] 网络异常拦截已启用（event-only） "
+                    f"(pattern={interception_cfg.get('listen_pattern')!r})"
+                )
+            except Exception as e:
+                logger.warning(f"[Executor] 网络异常拦截监听创建失败: {e}")
         
         # 始终创建 DOM 监听器（作为回退）
         self._stream_monitor = StreamMonitor(
@@ -117,6 +159,34 @@ class WorkflowExecutor:
         
         if self.stealth_mode:
             logger.debug("[STEALTH] 隐身模式已启用")
+
+    def _handle_network_event(self, event: Dict[str, Any]) -> bool:
+        """
+        将网络事件上报给命令引擎。
+        返回 True 表示命中拦截条件，应立即中断当前监听。
+        """
+        if not self.session:
+            return False
+        try:
+            from app.services.command_engine import command_engine
+            matched = bool(command_engine.handle_network_event(self.session, event))
+            if matched:
+                # 让 DOM/STREAM 流程也能立即停下来（与 stream_mode 无关）
+                try:
+                    from app.services.request_manager import request_manager
+                    request_manager.cancel_current("network_intercepted")
+                except Exception:
+                    pass
+                try:
+                    if hasattr(self.tab, "stop_loading"):
+                        self.tab.stop_loading()
+                    self.tab.run_js("if (window.stop) { window.stop(); }")
+                except Exception:
+                    pass
+            return matched
+        except Exception as e:
+            logger.debug(f"[Executor] 网络事件上报失败（忽略）: {e}")
+            return False
     
     # ================= 控制方法 =================
     
@@ -273,7 +343,7 @@ class WorkflowExecutor:
     # ================= 步骤执行 =================
     
     def execute_step(self, action: str, selector: str,
-                     target_key: str, value: str = None,
+                     target_key: str, value: Any = None,
                      optional: bool = False,
                      context: Dict = None) -> Generator[str, None, None]:
         """执行单个步骤"""
@@ -298,9 +368,12 @@ class WorkflowExecutor:
             elif action == "KEY_PRESS":
                 key = target_key or value
                 # 包含 Enter 的按键（Enter、Ctrl+Enter 等）可能触发提交
-                if key and "Enter" in key and self._network_monitor is not None:
+                if self._combo_contains_submit_key(key) and self._network_monitor is not None:
                     self._network_monitor.pre_start()
-                self._execute_keypress(key)
+                self._execute_keypress_combo(key)
+
+            elif action == "JS_EXEC":
+                self._execute_javascript(value)
             
             elif action == "CLICK":
                 # ===== 隐身模式：首次交互前执行人类行为预热 =====
@@ -320,6 +393,13 @@ class WorkflowExecutor:
                     )
                 else:
                     self._execute_click(selector, target_key, optional)
+
+            elif action == "COORD_CLICK":
+                if self.stealth_mode and not getattr(self, '_page_warmed_up', False):
+                    self._warmup_page_for_stealth()
+                    self._page_warmed_up = True
+
+                self._execute_coord_click(value, optional)
             
             elif action == "FILL_INPUT":
                 
@@ -333,10 +413,17 @@ class WorkflowExecutor:
             elif action in ("STREAM_WAIT", "STREAM_OUTPUT"):
                 user_input = context.get("prompt", "") if context else ""
                 
-                # 🆕 优先尝试网络监听，失败则回退到 DOM 监听
+                # 网络流式输出与网络异常拦截解耦：
+                # - mode=network: 走网络流式（可回退 DOM）
+                # - mode!=network 且启用拦截: 后台消费网络事件，前台仍走 DOM
                 monitor_used = None
-                
-                if self._network_monitor is not None:
+                use_network_stream = (
+                    self._network_monitor is not None
+                    and not self._intercept_only_mode
+                    and self._stream_mode == "network"
+                )
+
+                if use_network_stream:
                     try:
                         logger.debug("[Executor] 尝试网络监听模式")
                         yield from self._network_monitor.monitor(
@@ -345,6 +432,10 @@ class WorkflowExecutor:
                             completion_id=self._completion_id
                         )
                         monitor_used = "network"
+
+                    except NetworkInterceptionTriggered as e:
+                        logger.warning(f"[Executor] 网络拦截已触发: {e}")
+                        raise WorkflowError("network_intercepted")
                     
                     except NetworkMonitorTimeout as e:
                         logger.warning(
@@ -371,13 +462,46 @@ class WorkflowExecutor:
                         monitor_used = "dom_fallback"
                 
                 else:
+                    event_thread = None
+
+                    # DOM 模式下，若启用了网络拦截，则后台消费事件
+                    if self._network_monitor is not None and self._intercept_only_mode:
+                        def _consume_events():
+                            try:
+                                for _ in self._network_monitor.monitor(
+                                    selector=selector,
+                                    user_input=user_input,
+                                    completion_id=self._completion_id,
+                                ):
+                                    if self._check_cancelled():
+                                        break
+                            except (NetworkInterceptionTriggered, NetworkMonitorTimeout, NetworkMonitorError):
+                                pass
+                            except Exception as e:
+                                logger.debug(f"[Executor] 后台网络事件监听结束: {e}")
+
+                        event_thread = threading.Thread(
+                            target=_consume_events,
+                            daemon=True,
+                            name="net-intercept-bg",
+                        )
+                        event_thread.start()
+
                     # 未配置网络监听，直接使用 DOM 监听
-                    yield from self._stream_monitor.monitor(
-                        selector=selector,
-                        user_input=user_input,
-                        completion_id=self._completion_id
-                    )
-                    monitor_used = "dom"
+                    try:
+                        yield from self._stream_monitor.monitor(
+                            selector=selector,
+                            user_input=user_input,
+                            completion_id=self._completion_id
+                        )
+                        monitor_used = "dom"
+                    finally:
+                        if event_thread is not None:
+                            try:
+                                self._network_monitor._cleanup()
+                            except Exception:
+                                pass
+                            event_thread.join(timeout=0.2)
                 
                 if monitor_used:
                     logger.debug(f"[Executor] 监听完成 (mode={monitor_used})")
@@ -411,6 +535,108 @@ class WorkflowExecutor:
         
         self._smart_delay(0.1, 0.2)
     
+    def _execute_keypress_combo(self, key: Any):
+        """执行按键动作，支持组合键。"""
+        if self._check_cancelled():
+            return
+
+        keys = self._parse_key_combo(key)
+        if not keys:
+            return
+
+        if self.stealth_mode:
+            for item in keys:
+                self.tab.actions.key_down(item)
+                time.sleep(random.uniform(0.03, 0.09))
+            time.sleep(random.uniform(0.05, 0.13))
+            for item in reversed(keys):
+                self.tab.actions.key_up(item)
+                time.sleep(random.uniform(0.02, 0.08))
+        else:
+            for item in keys:
+                self.tab.actions.key_down(item)
+            for item in reversed(keys):
+                self.tab.actions.key_up(item)
+
+        self._smart_delay(0.1, 0.2)
+
+    def _execute_javascript(self, code: Any):
+        """在当前页面执行 JavaScript。"""
+        if self._check_cancelled():
+            return
+
+        script = str(code or "").strip()
+        if not script:
+            raise WorkflowError("js_exec_empty")
+
+        result = self.tab.run_js(script)
+        logger.debug(f"[JS_EXEC] 执行完成: {str(result)[:120]}")
+
+    def _combo_contains_submit_key(self, key: Any) -> bool:
+        return any(item == "Enter" for item in self._parse_key_combo(key))
+
+    def _parse_key_combo(self, key: Any) -> list[str]:
+        raw = str(key or "").strip()
+        if not raw:
+            return []
+
+        parts = [part.strip() for part in raw.split("+") if part.strip()]
+        normalized_parts = [self._normalize_key_name(part) for part in parts]
+        return [part for part in normalized_parts if part]
+
+    def _normalize_key_name(self, key: str) -> str:
+        normalized = str(key or "").strip()
+        if not normalized:
+            return ""
+
+        key_map = {
+            "ctrl": "Ctrl",
+            "control": "Ctrl",
+            "cmd": "Meta",
+            "command": "Meta",
+            "meta": "Meta",
+            "win": "Meta",
+            "windows": "Meta",
+            "shift": "Shift",
+            "alt": "Alt",
+            "option": "Alt",
+            "enter": "Enter",
+            "return": "Enter",
+            "esc": "Escape",
+            "escape": "Escape",
+            "tab": "Tab",
+            "space": "Space",
+            "spacebar": "Space",
+            "backspace": "Backspace",
+            "delete": "Delete",
+            "del": "Delete",
+            "insert": "Insert",
+            "home": "Home",
+            "end": "End",
+            "pageup": "PageUp",
+            "pagedown": "PageDown",
+            "up": "ArrowUp",
+            "down": "ArrowDown",
+            "left": "ArrowLeft",
+            "right": "ArrowRight",
+            "arrowup": "ArrowUp",
+            "arrowdown": "ArrowDown",
+            "arrowleft": "ArrowLeft",
+            "arrowright": "ArrowRight",
+        }
+
+        lower_name = normalized.lower()
+        if lower_name in key_map:
+            return key_map[lower_name]
+
+        if len(normalized) == 1:
+            return normalized.upper()
+
+        if lower_name.startswith("f") and lower_name[1:].isdigit():
+            return lower_name.upper()
+
+        return normalized
+
     def _execute_click(self, selector: str, target_key: str, optional: bool):
         """执行点击操作（v5.7 隐身模式人类化点击）"""
         if self._check_cancelled():
@@ -453,6 +679,156 @@ class WorkflowExecutor:
         
         elif not optional:
             raise ElementNotFoundError(f"点击目标未找到: {selector}")
+
+    def _execute_coord_click(self, value: Any, optional: bool):
+        """执行坐标点击动作。"""
+        if self._check_cancelled():
+            return
+
+        if not isinstance(value, dict):
+            if optional:
+                logger.warning("[COORD_CLICK] 缺少坐标配置，已跳过")
+                return
+            raise WorkflowError("coord_click_missing_value")
+
+        try:
+            x = int(value.get("x"))
+            y = int(value.get("y"))
+        except Exception:
+            if optional:
+                logger.warning(f"[COORD_CLICK] 坐标无效，已跳过: {value}")
+                return
+            raise WorkflowError("coord_click_invalid_position")
+
+        radius = max(0, int(value.get("random_radius", 0) or 0))
+        click_x = x + random.randint(-radius, radius) if radius > 0 else x
+        click_y = y + random.randint(-radius, radius) if radius > 0 else y
+
+        try:
+            self._human_cdp_click_at(click_x, click_y)
+            self._smart_delay(
+                BrowserConstants.ACTION_DELAY_MIN,
+                BrowserConstants.ACTION_DELAY_MAX
+            )
+        except Exception:
+            if optional:
+                logger.warning(f"[COORD_CLICK] 点击失败，已跳过: ({click_x}, {click_y})")
+                return
+            raise
+
+    def _ensure_mouse_origin(self) -> tuple:
+        """
+        确保存在一个页面内鼠标起点。
+
+        只使用 CDP mouseMoved 建立当前位置，不走 tab.actions / ele.click。
+        """
+        if self._mouse_pos is not None:
+            return self._mouse_pos
+
+        from app.utils.human_mouse import _dispatch_mouse_move
+
+        vw, vh = self._get_viewport_size()
+        origin_x = random.randint(max(40, int(vw * 0.18)), max(60, int(vw * 0.42)))
+        origin_y = random.randint(max(40, int(vh * 0.16)), max(60, int(vh * 0.45)))
+
+        _dispatch_mouse_move(self.tab, origin_x, origin_y)
+        self._mouse_pos = (origin_x, origin_y)
+        time.sleep(random.uniform(0.03, 0.10))
+        return self._mouse_pos
+
+    def _flash_click_marker(self, x: int, y: int):
+        """在页面上短暂标记实际点击坐标，便于排查坐标系问题。"""
+        try:
+            self.tab.run_js(
+                """
+                const x = arguments[0];
+                const y = arguments[1];
+                const id = '__coord_click_debug_marker__';
+                document.getElementById(id)?.remove();
+                const dot = document.createElement('div');
+                dot.id = id;
+                Object.assign(dot.style, {
+                    position: 'fixed',
+                    left: `${x - 6}px`,
+                    top: `${y - 6}px`,
+                    width: '12px',
+                    height: '12px',
+                    borderRadius: '9999px',
+                    background: 'rgba(255, 59, 48, 0.95)',
+                    border: '2px solid #fff',
+                    boxShadow: '0 0 0 2px rgba(255, 59, 48, 0.35)',
+                    zIndex: '2147483647',
+                    pointerEvents: 'none'
+                });
+                document.body.appendChild(dot);
+                setTimeout(() => dot.remove(), 900);
+                """,
+                x,
+                y
+            )
+        except Exception:
+            pass
+
+    def _human_cdp_click_at(self, x: int, y: int):
+        """
+        使用 human_mouse 轨迹移动，并以 CDP 精确点击结束。
+
+        链路固定为：
+        页面内某处起点 -> smooth_move_mouse -> 短暂停顿/微漂移 -> cdp_precise_click
+        """
+        if self._check_cancelled():
+            return
+
+        self._flash_click_marker(x, y)
+        logger.debug(f"[COORD_CLICK] viewport click at ({x}, {y})")
+
+        start_pos = self._ensure_mouse_origin()
+
+        self._mouse_pos = smooth_move_mouse(
+            tab=self.tab,
+            from_pos=start_pos,
+            to_pos=(x, y),
+            check_cancelled=self._check_cancelled
+        )
+
+        if self._check_cancelled():
+            return
+
+        if random.random() < 0.65:
+            self._mouse_pos = idle_drift(
+                tab=self.tab,
+                duration=random.uniform(0.04, 0.12),
+                center_pos=self._mouse_pos,
+                check_cancelled=self._check_cancelled,
+                drift_radius=random.uniform(1.2, 2.8),
+                freq_hz=random.uniform(6.0, 10.0)
+            )
+        else:
+            time.sleep(random.uniform(0.04, 0.10))
+
+        if self._check_cancelled():
+            return
+
+        success = cdp_precise_click(
+            tab=self.tab,
+            x=x,
+            y=y,
+            check_cancelled=self._check_cancelled
+        )
+        if not success:
+            logger.warning(f"[CDP_CLICK] 首次坐标点击失败，重试一次: ({x}, {y})")
+            time.sleep(random.uniform(0.08, 0.18))
+            success = cdp_precise_click(
+                tab=self.tab,
+                x=x,
+                y=y,
+                check_cancelled=self._check_cancelled
+            )
+
+        if not success:
+            raise WorkflowError("coord_click_failed")
+
+        self._mouse_pos = (x, y)
     
     def _stealth_click_element(self, ele):
         """
